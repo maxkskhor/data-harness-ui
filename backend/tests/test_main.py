@@ -1,0 +1,214 @@
+"""Tests for the data-harness-ui FastAPI backend."""
+from __future__ import annotations
+
+import io
+from unittest.mock import MagicMock, patch
+
+import pytest
+from fastapi.testclient import TestClient
+
+from main import app, _normalise_handle
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _mock_agent_session(answer: str = "mocked answer") -> MagicMock:
+    """Return a mock AgentSession whose ask_result() succeeds."""
+    session = MagicMock()
+    session.put.side_effect = lambda name, value, **kw: name
+    result = MagicMock()
+    result.status = "success"
+    result.text = answer
+    result.error = None
+    session.ask_result.return_value = result
+    # cache.get used nowhere in the new code, but keep it available
+    session.cache = MagicMock()
+    return session
+
+
+def _csv_bytes(content: str = "a,b\n1,2\n3,4\n") -> bytes:
+    return content.encode()
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def client():
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.fixture
+def session_id(client):
+    """Create a real session and return its ID."""
+    with patch("main._make_agent_session", return_value=_mock_agent_session()):
+        resp = client.post("/sessions")
+    assert resp.status_code == 200
+    return resp.json()["id"]
+
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
+
+def test_health(client):
+    assert client.get("/health").json() == {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Session lifecycle
+# ---------------------------------------------------------------------------
+
+def test_create_session_returns_welcome_message(client):
+    with patch("main._make_agent_session", return_value=_mock_agent_session()):
+        resp = client.post("/sessions")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "id" in body
+    assert body["messages"][0]["role"] == "assistant"
+    assert body["uploads"] == []
+
+
+def test_create_session_fails_without_api_key(client):
+    with patch("main.os.environ.get", return_value=None):
+        resp = client.post("/sessions")
+    assert resp.status_code == 503
+
+
+def test_get_session(client, session_id):
+    resp = client.get(f"/sessions/{session_id}")
+    assert resp.status_code == 200
+    assert resp.json()["id"] == session_id
+
+
+def test_get_missing_session(client):
+    assert client.get("/sessions/does-not-exist").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Uploads
+# ---------------------------------------------------------------------------
+
+def test_upload_csv(client, session_id):
+    resp = client.post(
+        f"/sessions/{session_id}/uploads",
+        files={"file": ("data.csv", io.BytesIO(_csv_bytes()), "text/csv")},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["handle"] == "data"
+    assert body["rows"] == 2
+    assert body["columns"] == ["a", "b"]
+    assert len(body["preview"]) == 2
+
+
+def test_upload_non_csv_rejected(client, session_id):
+    resp = client.post(
+        f"/sessions/{session_id}/uploads",
+        files={"file": ("data.txt", io.BytesIO(b"hello"), "text/plain")},
+    )
+    assert resp.status_code == 400
+
+
+def test_upload_empty_csv_still_accepted(client, session_id):
+    # An empty CSV is technically valid — pandas returns a DataFrame with 0 rows
+    resp = client.post(
+        f"/sessions/{session_id}/uploads",
+        files={"file": ("empty.csv", io.BytesIO(b"a,b\n"), "text/csv")},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["rows"] == 0
+
+
+def test_upload_puts_data_into_agent_session(client):
+    mock_session = _mock_agent_session()
+    with patch("main._make_agent_session", return_value=mock_session):
+        resp = client.post("/sessions")
+        sid = resp.json()["id"]
+
+    client.post(
+        f"/sessions/{sid}/uploads",
+        files={"file": ("sales.csv", io.BytesIO(_csv_bytes()), "text/csv")},
+    )
+    mock_session.put.assert_called_once()
+    call_args = mock_session.put.call_args
+    assert call_args[0][0] == "sales"  # handle name
+
+
+# ---------------------------------------------------------------------------
+# Messages
+# ---------------------------------------------------------------------------
+
+def test_send_message_returns_answer(client, session_id):
+    resp = client.post(
+        f"/sessions/{session_id}/messages",
+        json={"content": "What columns are in this?"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["message"]["role"] == "assistant"
+    assert body["message"]["content"] == "mocked answer"
+
+
+def test_send_message_appends_to_history(client, session_id):
+    client.post(f"/sessions/{session_id}/messages", json={"content": "first"})
+    client.post(f"/sessions/{session_id}/messages", json={"content": "second"})
+    resp = client.get(f"/sessions/{session_id}")
+    roles = [m["role"] for m in resp.json()["messages"]]
+    # welcome + user + assistant + user + assistant
+    assert roles.count("user") == 2
+    assert roles.count("assistant") == 3
+
+
+def test_send_empty_message_rejected(client, session_id):
+    resp = client.post(f"/sessions/{session_id}/messages", json={"content": "   "})
+    assert resp.status_code == 400
+
+
+def test_send_message_to_missing_session(client):
+    resp = client.post("/sessions/nope/messages", json={"content": "hi"})
+    assert resp.status_code == 404
+
+
+def test_max_turns_exceeded_returns_graceful_message(client):
+    mock_session = _mock_agent_session()
+    mock_session.ask_result.return_value.status = "max_turns_exceeded"
+    mock_session.ask_result.return_value.text = ""
+    with patch("main._make_agent_session", return_value=mock_session):
+        resp = client.post("/sessions")
+        sid = resp.json()["id"]
+    resp = client.post(f"/sessions/{sid}/messages", json={"content": "go"})
+    assert resp.status_code == 200
+    assert "turn limit" in resp.json()["message"]["content"]
+
+
+def test_agent_error_returns_graceful_message(client):
+    mock_session = _mock_agent_session()
+    mock_session.ask_result.return_value.status = "error"
+    mock_session.ask_result.return_value.text = ""
+    mock_session.ask_result.return_value.error = "something broke"
+    with patch("main._make_agent_session", return_value=mock_session):
+        resp = client.post("/sessions")
+        sid = resp.json()["id"]
+    resp = client.post(f"/sessions/{sid}/messages", json={"content": "go"})
+    assert resp.status_code == 200
+    assert "something broke" in resp.json()["message"]["content"]
+
+
+# ---------------------------------------------------------------------------
+# _normalise_handle
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("filename,expected", [
+    ("sales_data.csv", "sales_data"),
+    ("My File (2024).csv", "my_file_2024"),
+    ("123data.csv", "dataset_123data"),
+    (".csv", "dataset"),
+    ("UPPER.csv", "upper"),
+])
+def test_normalise_handle(filename, expected):
+    assert _normalise_handle(filename) == expected
