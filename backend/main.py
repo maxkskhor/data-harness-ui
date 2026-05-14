@@ -92,8 +92,8 @@ def _make_agent_session() -> AsyncAgentSession:
         adapter=adapter,
         system=(
             "You are a precise data analyst in a local data workbench. "
-            "Use Python when calculation or dataframe inspection is needed. "
-            "Refer to uploaded data by its cache handle."
+            "Use Python for calculations, dataframe inspection, and "
+            "evidence-backed answers. Answer in concise, readable Markdown."
         ),
         max_turns=10,
     )
