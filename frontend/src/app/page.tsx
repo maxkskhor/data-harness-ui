@@ -8,6 +8,7 @@ import {
   type ChangeEvent,
   type FormEvent,
   type KeyboardEvent,
+  type ReactNode,
 } from "react";
 import {
   createSession,
@@ -16,6 +17,8 @@ import {
   uploadDataset,
   type ChatMessage,
   type Session,
+  type ToolResultEvent,
+  type ToolUseEvent,
   type UploadSummary,
 } from "@/lib/api";
 
@@ -149,23 +152,21 @@ export default function WorkbenchPage() {
     );
     try {
       const nextSession = await streamMessage(session.id, content, (chunk) => {
-        setSession((current) => {
-          if (!current || current.id !== session.id) {
-            return current;
-          }
-          const messages = [...current.messages];
-          const last = messages.at(-1);
-          if (last?.role !== "assistant") {
-            return current;
-          }
-          messages[messages.length - 1] = {
-            ...last,
-            content: `${last.content}${chunk}`,
-          };
-          return { ...current, messages };
-        });
+        if (chunk.type === "chunk") {
+          appendAssistantChunk(session.id, chunk.data);
+        } else if (chunk.type === "tool_use") {
+          appendToolMessage(session.id, toolUseMessage(chunk.data));
+        } else if (chunk.type === "tool_result") {
+          appendToolMessage(session.id, toolResultMessage(chunk.data));
+        } else {
+          setError(chunk.data);
+        }
       });
-      setSession(nextSession);
+      setSession((current) =>
+        current && current.id === nextSession.id
+          ? { ...nextSession, messages: current.messages }
+          : nextSession,
+      );
     } catch (err) {
       setDraft(content);
       setError(errorMessage(err));
@@ -186,6 +187,40 @@ export default function WorkbenchPage() {
   function applyQuickQuestion(question: string) {
     setDraft(question);
     textareaRef.current?.focus();
+  }
+
+  function appendAssistantChunk(sessionId: string, chunk: string) {
+    setSession((current) => {
+      if (!current || current.id !== sessionId) {
+        return current;
+      }
+      const messages = [...current.messages];
+      const last = messages.at(-1);
+      if (last?.role !== "assistant") {
+        return current;
+      }
+      messages[messages.length - 1] = {
+        ...last,
+        content: `${last.content}${chunk}`,
+      };
+      return { ...current, messages };
+    });
+  }
+
+  function appendToolMessage(sessionId: string, message: ChatMessage) {
+    setSession((current) => {
+      if (!current || current.id !== sessionId) {
+        return current;
+      }
+      const messages = [...current.messages];
+      const assistant = messages.at(-1);
+      if (assistant?.role === "assistant") {
+        messages.splice(messages.length - 1, 0, message);
+      } else {
+        messages.push(message);
+      }
+      return { ...current, messages };
+    });
   }
 
   return (
@@ -256,6 +291,9 @@ export default function WorkbenchPage() {
               <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
                 {sessionStatus === "starting" ? (
                   <SystemMessage content="Starting a local session..." />
+                ) : null}
+                {isSessionReady && messageCount === 0 ? (
+                  <SystemMessage content="Upload a data source, then ask a question." />
                 ) : null}
                 {session?.messages.map((message, index) => (
                   <MessageBubble
@@ -354,22 +392,224 @@ export default function WorkbenchPage() {
 
 function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === "user";
+  const isTool = message.role === "tool";
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div
         className={`max-w-[85%] rounded-lg px-4 py-3 text-sm leading-6 ${
           isUser
             ? "bg-emerald-300 text-zinc-950"
+            : isTool
+              ? message.isError
+                ? "border border-red-900/70 bg-red-950/40 text-red-100"
+                : "border border-sky-900/70 bg-sky-950/30 text-sky-100"
             : "border border-zinc-800 bg-zinc-950 text-zinc-100"
         }`}
       >
         <div className="mb-1 text-[11px] font-medium uppercase tracking-normal opacity-70">
-          {isUser ? "You" : "Assistant"}
+          {isUser ? "You" : isTool ? message.title ?? "Tool" : "Assistant"}
         </div>
-        <p className="whitespace-pre-wrap break-words">{message.content}</p>
+        {isTool ? (
+          <pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words rounded border border-current/10 bg-black/20 p-2 font-mono text-xs leading-5">
+            {message.content}
+          </pre>
+        ) : isUser ? (
+          <p className="whitespace-pre-wrap break-words">{message.content}</p>
+        ) : (
+          <MarkdownContent content={message.content} />
+        )}
       </div>
     </div>
   );
+}
+
+function MarkdownContent({ content }: { content: string }) {
+  if (!content) {
+    return <p className="text-zinc-500">...</p>;
+  }
+
+  const blocks = splitMarkdownBlocks(content);
+  return (
+    <div className="space-y-3 break-words">
+      {blocks.map((block, index) => {
+        if (block.type === "code") {
+          return (
+            <pre
+              key={index}
+              className="overflow-auto rounded border border-zinc-800 bg-black/30 p-3 font-mono text-xs leading-5 text-zinc-200"
+            >
+              <code>{block.content}</code>
+            </pre>
+          );
+        }
+        if (block.type === "heading") {
+          return (
+            <h3 key={index} className="text-base font-semibold text-zinc-50">
+              {renderInlineMarkdown(block.content)}
+            </h3>
+          );
+        }
+        if (block.type === "list") {
+          return (
+            <ul key={index} className="list-disc space-y-1 pl-5">
+              {block.items.map((item, itemIndex) => (
+                <li key={itemIndex}>{renderInlineMarkdown(item)}</li>
+              ))}
+            </ul>
+          );
+        }
+        return (
+          <p key={index} className="whitespace-pre-wrap">
+            {renderInlineMarkdown(block.content)}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
+type MarkdownBlock =
+  | { type: "code"; content: string }
+  | { type: "heading"; content: string }
+  | { type: "list"; items: string[] }
+  | { type: "paragraph"; content: string };
+
+function splitMarkdownBlocks(content: string): MarkdownBlock[] {
+  const lines = content.split("\n");
+  const blocks: MarkdownBlock[] = [];
+  let paragraph: string[] = [];
+  let list: string[] = [];
+  let code: string[] | null = null;
+
+  function flushParagraph() {
+    if (paragraph.length > 0) {
+      blocks.push({ type: "paragraph", content: paragraph.join("\n") });
+      paragraph = [];
+    }
+  }
+
+  function flushList() {
+    if (list.length > 0) {
+      blocks.push({ type: "list", items: list });
+      list = [];
+    }
+  }
+
+  for (const line of lines) {
+    if (line.trim().startsWith("```")) {
+      if (code === null) {
+        flushParagraph();
+        flushList();
+        code = [];
+      } else {
+        blocks.push({ type: "code", content: code.join("\n") });
+        code = null;
+      }
+      continue;
+    }
+
+    if (code !== null) {
+      code.push(line);
+      continue;
+    }
+
+    if (!line.trim()) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+
+    const heading = line.match(/^#{1,3}\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      blocks.push({ type: "heading", content: heading[1] });
+      continue;
+    }
+
+    const listItem = line.match(/^\s*[-*]\s+(.+)$/);
+    if (listItem) {
+      flushParagraph();
+      list.push(listItem[1]);
+      continue;
+    }
+
+    flushList();
+    paragraph.push(line);
+  }
+
+  if (code !== null) {
+    blocks.push({ type: "code", content: code.join("\n") });
+  }
+  flushParagraph();
+  flushList();
+  return blocks;
+}
+
+function renderInlineMarkdown(content: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  const pattern = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+  let lastIndex = 0;
+
+  for (const match of content.matchAll(pattern)) {
+    if (match.index > lastIndex) {
+      nodes.push(content.slice(lastIndex, match.index));
+    }
+    const token = match[0];
+    if (token.startsWith("**")) {
+      nodes.push(
+        <strong key={nodes.length} className="font-semibold text-zinc-50">
+          {token.slice(2, -2)}
+        </strong>,
+      );
+    } else {
+      nodes.push(
+        <code
+          key={nodes.length}
+          className="rounded bg-zinc-800 px-1 py-0.5 font-mono text-xs text-emerald-200"
+        >
+          {token.slice(1, -1)}
+        </code>,
+      );
+    }
+    lastIndex = match.index + token.length;
+  }
+
+  if (lastIndex < content.length) {
+    nodes.push(content.slice(lastIndex));
+  }
+  return nodes;
+}
+
+function toolUseMessage(event: ToolUseEvent): ChatMessage {
+  const name = event.name ?? "tool";
+  return {
+    role: "tool",
+    kind: "tool_use",
+    title: `Tool call: ${name}`,
+    content: formatToolPayload(event.input ?? {}),
+  };
+}
+
+function toolResultMessage(event: ToolResultEvent): ChatMessage {
+  return {
+    role: "tool",
+    kind: "tool_result",
+    title: event.is_error ? "Tool error" : "Tool result",
+    content: event.content ?? "",
+    isError: event.is_error ?? false,
+  };
+}
+
+function formatToolPayload(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 function SystemMessage({ content }: { content: string }) {

@@ -12,6 +12,15 @@ from typing import Any, Literal
 
 import pandas as pd
 from data_harness import AsyncAgent, AsyncAgentSession
+from data_harness.streaming import (
+    ContentBlockDeltaEvent,
+    ContentBlockStartEvent,
+    ContentBlockStopEvent,
+    InputJSONDelta,
+    TextDelta,
+    ToolResultEvent,
+)
+from data_harness.types import ToolUseBlock
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -102,12 +111,6 @@ def create_session() -> SessionResponse:
         id=str(uuid.uuid4()),
         agent_session=_make_agent_session(),
     )
-    session.messages.append(
-        Message(
-            role="assistant",
-            content="Upload a dataset, then ask a question about it.",
-        )
-    )
     _sessions[session.id] = session
     return _serialise_session(session)
 
@@ -191,10 +194,21 @@ async def stream_message(
 
     async def events() -> AsyncGenerator[str, None]:
         answer_parts: list[str] = []
+        tool_json_by_index: dict[int, str] = {}
+        tool_use_by_index: dict[int, ToolUseBlock] = {}
         try:
-            async for chunk in session.agent_session.ask_stream(content):
-                answer_parts.append(chunk)
-                yield _stream_event("chunk", chunk)
+            async for item in session.agent_session.ask_stream(content):
+                normalised = _normalise_stream_item(
+                    item,
+                    tool_json_by_index=tool_json_by_index,
+                    tool_use_by_index=tool_use_by_index,
+                )
+                if normalised is None:
+                    continue
+                event_type, data = normalised
+                if event_type == "chunk":
+                    answer_parts.append(str(data))
+                yield _stream_event(event_type, data)
         except Exception as exc:
             answer = f"Agent error: {exc!r}."
             session.messages.append(Message(role="assistant", content=answer))
@@ -242,3 +256,83 @@ async def _maybe_await(value: Any) -> Any:
 
 def _stream_event(event_type: str, data: Any) -> str:
     return json.dumps({"type": event_type, "data": data}) + "\n"
+
+
+def _normalise_stream_item(
+    item: Any,
+    *,
+    tool_json_by_index: dict[int, str] | None = None,
+    tool_use_by_index: dict[int, ToolUseBlock] | None = None,
+) -> tuple[str, Any] | None:
+    if isinstance(item, str):
+        return "chunk", item
+    if isinstance(item, ContentBlockStartEvent):
+        if isinstance(item.content_block, ToolUseBlock):
+            if tool_json_by_index is not None:
+                tool_json_by_index[item.index] = ""
+            if tool_use_by_index is not None:
+                tool_use_by_index[item.index] = item.content_block
+        else:
+            if tool_json_by_index is not None:
+                tool_json_by_index.pop(item.index, None)
+            if tool_use_by_index is not None:
+                tool_use_by_index.pop(item.index, None)
+        return None
+    if isinstance(item, ContentBlockDeltaEvent):
+        if isinstance(item.delta, TextDelta):
+            return "chunk", item.delta.text
+        if isinstance(item.delta, InputJSONDelta):
+            if tool_json_by_index is not None:
+                tool_json_by_index[item.index] = (
+                    tool_json_by_index.get(item.index, "") + item.delta.partial_json
+                )
+        return None
+    if isinstance(item, ContentBlockStopEvent):
+        if tool_json_by_index is None or tool_use_by_index is None:
+            return None
+        tool_use = tool_use_by_index.get(item.index)
+        if tool_use is None:
+            return None
+        raw_input = tool_json_by_index.get(item.index, "")
+        try:
+            tool_input = json.loads(raw_input) if raw_input else {}
+        except json.JSONDecodeError:
+            tool_input = {}
+        tool_json_by_index.pop(item.index, None)
+        tool_use_by_index.pop(item.index, None)
+        return (
+            "tool_use",
+            {
+                "id": tool_use.tool_use_id,
+                "name": tool_use.tool_name,
+                "input": tool_input,
+            },
+        )
+    if isinstance(item, ToolResultEvent):
+        return (
+            "tool_result",
+            {
+                "id": item.tool_use_id,
+                "name": item.tool_name,
+                "content": item.content,
+                "is_error": item.is_error,
+            },
+        )
+    if isinstance(item, dict):
+        event_type = item.get("type")
+        if event_type in {"chunk", "tool_use", "tool_result", "error"}:
+            return event_type, item.get("data", "")
+    event_type = getattr(item, "type", None)
+    data = getattr(item, "data", None)
+    if event_type in {"chunk", "tool_use", "tool_result", "error"}:
+        return event_type, data if data is not None else ""
+    if event_type in {
+        "message_start",
+        "message_delta",
+        "message_stop",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+    }:
+        return None
+    return "chunk", str(item)

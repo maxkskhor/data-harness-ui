@@ -5,6 +5,15 @@ import io
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from data_harness.streaming import (
+    ContentBlockDeltaEvent,
+    ContentBlockStartEvent,
+    ContentBlockStopEvent,
+    InputJSONDelta,
+    TextDelta,
+    ToolResultEvent,
+)
+from data_harness.types import ToolUseBlock
 from fastapi.testclient import TestClient
 
 from main import app, _normalise_handle
@@ -68,13 +77,13 @@ def test_health(client):
 # Session lifecycle
 # ---------------------------------------------------------------------------
 
-def test_create_session_returns_welcome_message(client):
+def test_create_session_starts_without_messages(client):
     with patch("main._make_agent_session", return_value=_mock_agent_session()):
         resp = client.post("/sessions")
     assert resp.status_code == 200
     body = resp.json()
     assert "id" in body
-    assert body["messages"][0]["role"] == "assistant"
+    assert body["messages"] == []
     assert body["uploads"] == []
 
 
@@ -181,6 +190,92 @@ def test_stream_message_returns_ndjson_chunks(client):
     assert '"type": "done"' in events[-1]
 
 
+def test_stream_message_forwards_tool_events(client):
+    mock_session = _mock_agent_session()
+
+    async def ask_stream(_content):
+        yield {
+            "type": "tool_use",
+            "data": {"id": "call_1", "name": "python_interpreter", "input": {"code": "df.head()"}},
+        }
+        yield {
+            "type": "tool_result",
+            "data": {"id": "call_1", "content": "shape: (2, 2)", "is_error": False},
+        }
+        yield "# Result\nThe table has **2 rows**."
+
+    mock_session.ask_stream = ask_stream
+    with patch("main._make_agent_session", return_value=mock_session):
+        resp = client.post("/sessions")
+        sid = resp.json()["id"]
+
+    resp = client.post(f"/sessions/{sid}/messages/stream", json={"content": "inspect"})
+
+    assert resp.status_code == 200
+    events = [line for line in resp.text.splitlines() if line]
+    assert '"type": "tool_use"' in events[0]
+    assert "python_interpreter" in events[0]
+    assert '"type": "tool_result"' in events[1]
+    assert "shape: (2, 2)" in events[1]
+    assert '"type": "chunk"' in events[2]
+    assert '"type": "done"' in events[3]
+    history = client.get(f"/sessions/{sid}").json()["messages"]
+    assert history[-1] == {
+        "role": "assistant",
+        "content": "# Result\nThe table has **2 rows**.",
+    }
+
+
+def test_stream_message_maps_data_harness_stream_events(client):
+    mock_session = _mock_agent_session()
+
+    async def ask_stream(_content):
+        yield ContentBlockStartEvent(
+            index=0,
+            content_block=ToolUseBlock(
+                tool_use_id="call_1",
+                tool_name="python_interpreter",
+                tool_input={},
+            ),
+        )
+        yield ContentBlockDeltaEvent(
+            index=0,
+            delta=InputJSONDelta(partial_json='{"code": "df.describe()"}'),
+        )
+        yield ContentBlockStopEvent(index=0)
+        yield ToolResultEvent(
+            tool_use_id="call_1",
+            tool_name="python_interpreter",
+            content="count mean std",
+            is_error=False,
+        )
+        yield ContentBlockStartEvent(index=1, content_block=MagicMock())
+        yield ContentBlockDeltaEvent(index=1, delta=TextDelta(text="# Summary\n"))
+        yield ContentBlockDeltaEvent(index=1, delta=TextDelta(text="- Done"))
+        yield ContentBlockStopEvent(index=1)
+
+    mock_session.ask_stream = ask_stream
+    with patch("main._make_agent_session", return_value=mock_session):
+        resp = client.post("/sessions")
+        sid = resp.json()["id"]
+
+    resp = client.post(f"/sessions/{sid}/messages/stream", json={"content": "inspect"})
+
+    assert resp.status_code == 200
+    events = [line for line in resp.text.splitlines() if line]
+    assert '"type": "tool_use"' in events[0]
+    assert '"code": "df.describe()"' in events[0]
+    assert '"type": "tool_result"' in events[1]
+    assert "count mean std" in events[1]
+    assert '"type": "chunk"' in events[2]
+    assert '"# Summary\\n"' in events[2]
+    assert '"type": "chunk"' in events[3]
+    assert '"- Done"' in events[3]
+    assert '"type": "done"' in events[4]
+    history = client.get(f"/sessions/{sid}").json()["messages"]
+    assert history[-1] == {"role": "assistant", "content": "# Summary\n- Done"}
+
+
 def test_stream_message_appends_to_history(client, session_id):
     resp = client.post(f"/sessions/{session_id}/messages/stream", json={"content": "go"})
 
@@ -195,9 +290,9 @@ def test_send_message_appends_to_history(client, session_id):
     client.post(f"/sessions/{session_id}/messages", json={"content": "second"})
     resp = client.get(f"/sessions/{session_id}")
     roles = [m["role"] for m in resp.json()["messages"]]
-    # welcome + user + assistant + user + assistant
+    # user + assistant + user + assistant
     assert roles.count("user") == 2
-    assert roles.count("assistant") == 3
+    assert roles.count("assistant") == 2
 
 
 def test_send_empty_message_rejected(client, session_id):

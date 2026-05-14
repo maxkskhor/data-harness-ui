@@ -1,6 +1,9 @@
 export type ChatMessage = {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "tool";
   content: string;
+  kind?: "tool_use" | "tool_result";
+  title?: string;
+  isError?: boolean;
 };
 
 export type UploadSummary = {
@@ -67,13 +70,27 @@ export async function sendMessage(
 
 type StreamEvent =
   | { type: "chunk"; data: string }
+  | { type: "tool_use"; data: ToolUseEvent }
+  | { type: "tool_result"; data: ToolResultEvent }
   | { type: "error"; data: string }
   | { type: "done"; data: Session };
+
+export type ToolUseEvent = {
+  id?: string;
+  name?: string;
+  input?: unknown;
+};
+
+export type ToolResultEvent = {
+  id?: string;
+  content?: string;
+  is_error?: boolean;
+};
 
 export async function streamMessage(
   sessionId: string,
   content: string,
-  onChunk: (chunk: string) => void,
+  onEvent: (event: Exclude<StreamEvent, { type: "done" }>) => void,
 ): Promise<Session> {
   const response = await fetch(
     `${API_BASE_URL}/sessions/${sessionId}/messages/stream`,
@@ -114,12 +131,10 @@ export async function streamMessage(
         continue;
       }
       const event = JSON.parse(line) as StreamEvent;
-      if (event.type === "chunk") {
-        onChunk(event.data);
-      } else if (event.type === "error") {
-        throw new Error(event.data);
-      } else {
+      if (event.type === "done") {
         finalSession = event.data;
+      } else {
+        onEvent(event);
       }
     }
   }
@@ -127,12 +142,10 @@ export async function streamMessage(
   buffer += decoder.decode();
   if (buffer.trim()) {
     const event = JSON.parse(buffer) as StreamEvent;
-    if (event.type === "chunk") {
-      onChunk(event.data);
-    } else if (event.type === "error") {
-      throw new Error(event.data);
-    } else {
+    if (event.type === "done") {
       finalSession = event.data;
+    } else {
+      onEvent(event);
     }
   }
 
