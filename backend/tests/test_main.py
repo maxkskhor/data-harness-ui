@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import io
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,14 +15,19 @@ from main import app, _normalise_handle
 # ---------------------------------------------------------------------------
 
 def _mock_agent_session(answer: str = "mocked answer") -> MagicMock:
-    """Return a mock AgentSession whose ask_result() succeeds."""
+    """Return a mock AsyncAgentSession whose ask_result() succeeds."""
     session = MagicMock()
     session.put.side_effect = lambda name, value, **kw: name
     result = MagicMock()
     result.status = "success"
     result.text = answer
     result.error = None
-    session.ask_result.return_value = result
+    session.ask_result = AsyncMock(return_value=result)
+
+    async def ask_stream(_content):
+        yield answer
+
+    session.ask_stream = ask_stream
     # cache.get used nowhere in the new code, but keep it available
     session.cache = MagicMock()
     return session
@@ -154,6 +159,37 @@ def test_send_message_returns_answer(client, session_id):
     assert body["message"]["content"] == "mocked answer"
 
 
+def test_stream_message_returns_ndjson_chunks(client):
+    mock_session = _mock_agent_session()
+
+    async def ask_stream(_content):
+        yield "hello"
+        yield " world"
+
+    mock_session.ask_stream = ask_stream
+    with patch("main._make_agent_session", return_value=mock_session):
+        resp = client.post("/sessions")
+        sid = resp.json()["id"]
+
+    resp = client.post(f"/sessions/{sid}/messages/stream", json={"content": "go"})
+
+    assert resp.status_code == 200
+    events = [line for line in resp.text.splitlines() if line]
+    assert '"type": "chunk"' in events[0]
+    assert '"hello"' in events[0]
+    assert '" world"' in events[1]
+    assert '"type": "done"' in events[-1]
+
+
+def test_stream_message_appends_to_history(client, session_id):
+    resp = client.post(f"/sessions/{session_id}/messages/stream", json={"content": "go"})
+
+    assert resp.status_code == 200
+    history = client.get(f"/sessions/{session_id}").json()["messages"]
+    assert history[-2] == {"role": "user", "content": "go"}
+    assert history[-1] == {"role": "assistant", "content": "mocked answer"}
+
+
 def test_send_message_appends_to_history(client, session_id):
     client.post(f"/sessions/{session_id}/messages", json={"content": "first"})
     client.post(f"/sessions/{session_id}/messages", json={"content": "second"})
@@ -176,8 +212,9 @@ def test_send_message_to_missing_session(client):
 
 def test_max_turns_exceeded_returns_graceful_message(client):
     mock_session = _mock_agent_session()
-    mock_session.ask_result.return_value.status = "max_turns_exceeded"
-    mock_session.ask_result.return_value.text = ""
+    result = mock_session.ask_result.return_value
+    result.status = "max_turns_exceeded"
+    result.text = ""
     with patch("main._make_agent_session", return_value=mock_session):
         resp = client.post("/sessions")
         sid = resp.json()["id"]
@@ -188,9 +225,10 @@ def test_max_turns_exceeded_returns_graceful_message(client):
 
 def test_agent_error_returns_graceful_message(client):
     mock_session = _mock_agent_session()
-    mock_session.ask_result.return_value.status = "error"
-    mock_session.ask_result.return_value.text = ""
-    mock_session.ask_result.return_value.error = "something broke"
+    result = mock_session.ask_result.return_value
+    result.status = "error"
+    result.text = ""
+    result.error = "something broke"
     with patch("main._make_agent_session", return_value=mock_session):
         resp = client.post("/sessions")
         sid = resp.json()["id"]

@@ -3,15 +3,19 @@ from __future__ import annotations
 import os
 import re
 import uuid
+import json
+import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from collections.abc import AsyncGenerator
+from typing import Any, Literal
 
 import pandas as pd
-from data_harness import Agent, AgentSession
+from data_harness import AsyncAgent, AsyncAgentSession
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 load_dotenv(Path(__file__).with_name(".env"))
@@ -51,7 +55,7 @@ class ChatResponse(BaseModel):
 @dataclass
 class SessionState:
     id: str
-    agent_session: AgentSession
+    agent_session: AsyncAgentSession
     messages: list[Message] = field(default_factory=list)
     uploads: list[UploadSummary] = field(default_factory=list)
 
@@ -68,14 +72,14 @@ app.add_middleware(
 _sessions: dict[str, SessionState] = {}
 
 
-def _make_agent_session() -> AgentSession:
+def _make_agent_session() -> AsyncAgentSession:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not configured.")
-    from data_harness.providers.openai import OpenAIAdapter
+    from data_harness.providers.openai import AsyncOpenAIAdapter
 
-    adapter = OpenAIAdapter(model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
-    agent = Agent(
+    adapter = AsyncOpenAIAdapter(model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
+    agent = AsyncAgent(
         adapter=adapter,
         system=(
             "You are a precise data analyst in a local data workbench. "
@@ -84,7 +88,7 @@ def _make_agent_session() -> AgentSession:
         ),
         max_turns=10,
     )
-    return agent.session()
+    return agent.async_session()
 
 
 @app.get("/health")
@@ -149,7 +153,7 @@ async def upload_dataset(
 
 
 @app.post("/sessions/{session_id}/messages", response_model=ChatResponse)
-def send_message(session_id: str, request: ChatRequest) -> ChatResponse:
+async def send_message(session_id: str, request: ChatRequest) -> ChatResponse:
     session = _get_session(session_id)
     content = request.content.strip()
     if not content:
@@ -157,7 +161,7 @@ def send_message(session_id: str, request: ChatRequest) -> ChatResponse:
 
     session.messages.append(Message(role="user", content=content))
 
-    result = session.agent_session.ask_result(content)
+    result = await _maybe_await(session.agent_session.ask_result(content))
     if result.status == "success":
         answer = result.text
     elif result.status == "max_turns_exceeded":
@@ -171,6 +175,38 @@ def send_message(session_id: str, request: ChatRequest) -> ChatResponse:
         message=assistant_message,
         session=_serialise_session(session),
     )
+
+
+@app.post("/sessions/{session_id}/messages/stream")
+async def stream_message(
+    session_id: str,
+    request: ChatRequest,
+) -> StreamingResponse:
+    session = _get_session(session_id)
+    content = request.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Message cannot be empty.")
+
+    session.messages.append(Message(role="user", content=content))
+
+    async def events() -> AsyncGenerator[str, None]:
+        answer_parts: list[str] = []
+        try:
+            async for chunk in session.agent_session.ask_stream(content):
+                answer_parts.append(chunk)
+                yield _stream_event("chunk", chunk)
+        except Exception as exc:
+            answer = f"Agent error: {exc!r}."
+            session.messages.append(Message(role="assistant", content=answer))
+            yield _stream_event("error", answer)
+            yield _stream_event("done", _serialise_session(session).model_dump())
+            return
+
+        answer = "".join(answer_parts)
+        session.messages.append(Message(role="assistant", content=answer))
+        yield _stream_event("done", _serialise_session(session).model_dump())
+
+    return StreamingResponse(events(), media_type="application/x-ndjson")
 
 
 def _serialise_session(session: SessionState) -> SessionResponse:
@@ -196,3 +232,13 @@ def _normalise_handle(filename: str) -> str:
     if handle[0].isdigit():
         handle = f"dataset_{handle}"
     return handle
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+def _stream_event(event_type: str, data: Any) -> str:
+    return json.dumps({"type": event_type, "data": data}) + "\n"

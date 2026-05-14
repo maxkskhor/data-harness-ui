@@ -12,7 +12,7 @@ import {
 import {
   createSession,
   getSession,
-  sendMessage,
+  streamMessage,
   uploadDataset,
   type ChatMessage,
   type Session,
@@ -135,11 +135,41 @@ export default function WorkbenchPage() {
     setDraft("");
     setIsSending(true);
     setError(null);
+    setSession((current) =>
+      current?.id === session.id
+        ? {
+            ...current,
+            messages: [
+              ...current.messages,
+              { role: "user", content },
+              { role: "assistant", content: "" },
+            ],
+          }
+        : current,
+    );
     try {
-      setSession(await sendMessage(session.id, content));
+      const nextSession = await streamMessage(session.id, content, (chunk) => {
+        setSession((current) => {
+          if (!current || current.id !== session.id) {
+            return current;
+          }
+          const messages = [...current.messages];
+          const last = messages.at(-1);
+          if (last?.role !== "assistant") {
+            return current;
+          }
+          messages[messages.length - 1] = {
+            ...last,
+            content: `${last.content}${chunk}`,
+          };
+          return { ...current, messages };
+        });
+      });
+      setSession(nextSession);
     } catch (err) {
       setDraft(content);
       setError(errorMessage(err));
+      setSession(await getSession(session.id).catch(() => session));
     } finally {
       setIsSending(false);
       textareaRef.current?.focus();
@@ -240,7 +270,7 @@ export default function WorkbenchPage() {
                   <SystemMessage content="Reading the uploaded data source..." />
                 ) : null}
                 {isSending ? (
-                  <SystemMessage content="Working on the latest question..." />
+                  <SystemMessage content="Streaming the latest answer..." />
                 ) : null}
                 <div ref={messagesEndRef} />
               </div>

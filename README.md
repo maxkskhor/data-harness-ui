@@ -42,12 +42,11 @@ Open [http://localhost:3000](http://localhost:3000).
 
 1. Open the app — a session is created automatically.
 2. Upload a CSV.
-3. Ask a question about it.
+3. Ask a question about it and watch the assistant response stream in.
 4. Ask follow-up questions using the same session context.
 
 ## Later milestones
 
-- Response streaming
 - Durable session persistence
 - Project / workspace / history sidebar
 - Additional data sources: databases, local files, MCP, data APIs

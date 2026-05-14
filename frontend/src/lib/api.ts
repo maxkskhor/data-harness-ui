@@ -64,3 +64,80 @@ export async function sendMessage(
   );
   return result.session;
 }
+
+type StreamEvent =
+  | { type: "chunk"; data: string }
+  | { type: "error"; data: string }
+  | { type: "done"; data: Session };
+
+export async function streamMessage(
+  sessionId: string,
+  content: string,
+  onChunk: (chunk: string) => void,
+): Promise<Session> {
+  const response = await fetch(
+    `${API_BASE_URL}/sessions/${sessionId}/messages/stream`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    },
+  );
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    const detail = body?.detail ?? `Request failed with ${response.status}`;
+    throw new Error(detail);
+  }
+
+  if (!response.body) {
+    throw new Error("Streaming response was empty.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalSession: Session | null = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      if (!line.trim()) {
+        continue;
+      }
+      const event = JSON.parse(line) as StreamEvent;
+      if (event.type === "chunk") {
+        onChunk(event.data);
+      } else if (event.type === "error") {
+        throw new Error(event.data);
+      } else {
+        finalSession = event.data;
+      }
+    }
+  }
+
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    const event = JSON.parse(buffer) as StreamEvent;
+    if (event.type === "chunk") {
+      onChunk(event.data);
+    } else if (event.type === "error") {
+      throw new Error(event.data);
+    } else {
+      finalSession = event.data;
+    }
+  }
+
+  if (!finalSession) {
+    throw new Error("Streaming response ended without a final session.");
+  }
+  return finalSession;
+}
