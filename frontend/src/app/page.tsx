@@ -49,12 +49,12 @@ export default function WorkbenchPage() {
 
   const statusLabel = useMemo(() => {
     if (sessionStatus === "starting") {
-      return "Starting session";
+      return "starting";
     }
     if (sessionStatus === "error") {
-      return "Session error";
+      return "error";
     }
-    return "Local session";
+    return "live";
   }, [sessionStatus]);
 
   useEffect(() => {
@@ -224,27 +224,32 @@ export default function WorkbenchPage() {
   }
 
   return (
-    <main className="min-h-screen bg-zinc-950 text-zinc-100">
+    <main className="min-h-screen bg-background text-foreground">
       <div className="flex min-h-screen flex-col">
-        <header className="border-b border-zinc-800 bg-zinc-950/95 px-4 py-3">
+        <header className="border-b border-border bg-background/95 px-4 py-3">
           <div className="mx-auto flex max-w-7xl items-center justify-between gap-4">
             <div className="min-w-0">
-              <h1 className="text-sm font-semibold tracking-normal text-zinc-100">
-                Data Harness
-              </h1>
-              <p className="mt-0.5 truncate text-xs text-zinc-500">
-                Session {session?.id.slice(0, 8) ?? "pending"}
+              <div className="flex items-baseline gap-3">
+                <h1 className="font-mono text-sm font-semibold uppercase tracking-wide text-foreground">
+                  Data Harness
+                </h1>
+                <p className="hidden truncate text-xs text-muted sm:block">
+                  Ask questions of a CSV. Python sandboxed, no bash.
+                </p>
+              </div>
+              <p className="mt-0.5 truncate font-mono text-xs text-muted">
+                session {session?.id.slice(0, 8) ?? "pending"}
               </p>
             </div>
-            <div className="flex items-center gap-3 text-xs text-zinc-400">
+            <div className="flex items-center gap-3 font-mono text-xs text-muted">
               <span className="flex items-center gap-2">
                 <span
                   className={`h-2 w-2 rounded-full ${
                     sessionStatus === "ready"
-                      ? "bg-emerald-400"
+                      ? "bg-accent"
                       : sessionStatus === "error"
-                        ? "bg-red-400"
-                        : "bg-amber-300"
+                        ? "bg-danger"
+                        : "bg-muted"
                   }`}
                 />
                 {statusLabel}
@@ -253,7 +258,7 @@ export default function WorkbenchPage() {
                 type="button"
                 onClick={restartSession}
                 disabled={sessionStatus === "starting"}
-                className="h-8 rounded border border-zinc-700 px-3 text-zinc-200 transition hover:border-zinc-500 hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-50"
+                className="h-8 rounded border border-border px-3 text-foreground transition hover:border-accent hover:bg-panel-soft disabled:cursor-not-allowed disabled:opacity-50"
               >
                 New session
               </button>
@@ -262,11 +267,11 @@ export default function WorkbenchPage() {
         </header>
 
         <div className="mx-auto grid w-full max-w-7xl flex-1 grid-cols-1 gap-4 px-4 py-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
-          <section className="flex min-h-[calc(100vh-7rem)] flex-col overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900">
-            <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
+          <section className="flex min-h-[calc(100vh-7rem)] flex-col overflow-hidden rounded-lg border border-border bg-panel">
+            <div className="flex items-center justify-between border-b border-border px-4 py-3">
               <div>
-                <h2 className="text-sm font-medium text-zinc-100">Chat</h2>
-                <p className="mt-0.5 text-xs text-zinc-500">
+                <h2 className="text-sm font-medium text-foreground">Chat</h2>
+                <p className="mt-0.5 text-xs text-muted">
                   Ask against the active workbench session.
                 </p>
               </div>
@@ -274,7 +279,7 @@ export default function WorkbenchPage() {
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={!isSessionReady || isUploading}
-                className="h-9 rounded bg-zinc-100 px-3 text-sm font-medium text-zinc-950 transition hover:bg-white disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
+                className="h-9 rounded bg-accent px-3 text-sm font-medium text-accent-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:bg-panel-soft disabled:text-muted"
               >
                 {isUploading ? "Uploading" : "Upload source"}
               </button>
@@ -314,9 +319,9 @@ export default function WorkbenchPage() {
               </div>
             </div>
 
-            <div className="border-t border-zinc-800 bg-zinc-950/70 p-4">
+            <div className="border-t border-border bg-background/70 p-4">
               {error ? (
-                <div className="mb-3 rounded border border-red-900/70 bg-red-950/40 px-3 py-2 text-sm text-red-200">
+                <div className="mb-3 rounded border border-danger/40 bg-danger-soft px-3 py-2 text-sm text-danger">
                   {error}
                 </div>
               ) : null}
@@ -328,7 +333,7 @@ export default function WorkbenchPage() {
                     type="button"
                     onClick={() => applyQuickQuestion(question)}
                     disabled={!isSessionReady || isBusy}
-                    className="rounded border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 transition hover:border-zinc-500 hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="rounded border border-border px-3 py-1.5 text-xs text-muted transition hover:border-accent hover:bg-panel-soft disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {question}
                   </button>
@@ -337,7 +342,7 @@ export default function WorkbenchPage() {
 
               <form
                 onSubmit={handleSubmit}
-                className="flex items-end gap-3 rounded-lg border border-zinc-700 bg-zinc-900 p-2"
+                className="flex items-end gap-3 rounded-lg border border-border bg-panel p-2"
               >
                 <textarea
                   ref={textareaRef}
@@ -351,12 +356,12 @@ export default function WorkbenchPage() {
                       : "Upload a data source, then ask a question"
                   }
                   disabled={!isSessionReady || isSending}
-                  className="min-h-11 flex-1 resize-none bg-transparent px-2 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 disabled:cursor-not-allowed"
+                  className="min-h-11 flex-1 resize-none bg-transparent px-2 py-2 text-sm text-foreground outline-none placeholder:text-muted disabled:cursor-not-allowed"
                 />
                 <button
                   type="submit"
                   disabled={!isSessionReady || !draft.trim() || isSending}
-                  className="h-10 rounded bg-emerald-300 px-4 text-sm font-semibold text-zinc-950 transition hover:bg-emerald-200 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
+                  className="h-10 rounded bg-accent px-4 text-sm font-semibold text-accent-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:bg-panel-soft disabled:text-muted"
                 >
                   Send
                 </button>
@@ -365,19 +370,19 @@ export default function WorkbenchPage() {
           </section>
 
           <aside className="flex min-h-[24rem] flex-col gap-4 lg:min-h-0">
-            <section className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
-              <h2 className="text-sm font-medium text-zinc-100">Sources</h2>
+            <section className="rounded-lg border border-border bg-panel p-4">
+              <h2 className="text-sm font-medium text-foreground">Sources</h2>
               {latestUpload ? (
                 <UploadSummaryPanel upload={latestUpload} />
               ) : (
-                <div className="mt-4 rounded border border-dashed border-zinc-700 px-3 py-8 text-center text-sm text-zinc-500">
+                <div className="mt-4 rounded border border-dashed border-border px-3 py-8 text-center text-sm text-muted">
                   No data source loaded
                 </div>
               )}
             </section>
 
-            <section className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
-              <h2 className="text-sm font-medium text-zinc-100">Session</h2>
+            <section className="rounded-lg border border-border bg-panel p-4">
+              <h2 className="text-sm font-medium text-foreground">Session</h2>
               <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
                 <Stat label="Messages" value={String(messageCount)} />
                 <Stat label="Sources" value={String(session?.uploads.length ?? 0)} />
@@ -391,29 +396,24 @@ export default function WorkbenchPage() {
 }
 
 function MessageBubble({ message }: { message: ChatMessage }) {
+  if (message.role === "tool") {
+    return <ToolTrace message={message} />;
+  }
+
   const isUser = message.role === "user";
-  const isTool = message.role === "tool";
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div
         className={`max-w-[85%] rounded-lg px-4 py-3 text-sm leading-6 ${
           isUser
-            ? "bg-emerald-300 text-zinc-950"
-            : isTool
-              ? message.isError
-                ? "border border-red-900/70 bg-red-950/40 text-red-100"
-                : "border border-sky-900/70 bg-sky-950/30 text-sky-100"
-            : "border border-zinc-800 bg-zinc-950 text-zinc-100"
+            ? "bg-accent text-accent-foreground"
+            : "border border-border bg-background text-foreground"
         }`}
       >
-        <div className="mb-1 text-[11px] font-medium uppercase tracking-normal opacity-70">
-          {isUser ? "You" : isTool ? message.title ?? "Tool" : "Assistant"}
+        <div className="mb-1 font-mono text-[11px] font-medium uppercase tracking-wide opacity-70">
+          {isUser ? "You" : "Assistant"}
         </div>
-        {isTool ? (
-          <pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words rounded border border-current/10 bg-black/20 p-2 font-mono text-xs leading-5">
-            {message.content}
-          </pre>
-        ) : isUser ? (
+        {isUser ? (
           <p className="whitespace-pre-wrap break-words">{message.content}</p>
         ) : (
           <MarkdownContent content={message.content} />
@@ -423,9 +423,34 @@ function MessageBubble({ message }: { message: ChatMessage }) {
   );
 }
 
+function ToolTrace({ message }: { message: ChatMessage }) {
+  const isError = Boolean(message.isError);
+  return (
+    <div
+      className={`w-full max-w-[85%] rounded-r border-l-2 px-3 py-2 font-mono text-xs leading-5 ${
+        isError
+          ? "border-danger bg-danger-soft text-danger"
+          : "border-tool bg-tool-soft text-tool"
+      }`}
+    >
+      <div className="mb-1 flex items-center gap-2 uppercase tracking-wide">
+        <span
+          className={`h-1.5 w-1.5 rounded-full ${
+            isError ? "bg-danger" : "bg-tool"
+          }`}
+        />
+        {message.title ?? "Tool"}
+      </div>
+      <pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words text-foreground/80">
+        {message.content}
+      </pre>
+    </div>
+  );
+}
+
 function MarkdownContent({ content }: { content: string }) {
   if (!content) {
-    return <p className="text-zinc-500">...</p>;
+    return <p className="text-muted">...</p>;
   }
 
   const blocks = splitMarkdownBlocks(content);
@@ -436,7 +461,7 @@ function MarkdownContent({ content }: { content: string }) {
           return (
             <pre
               key={index}
-              className="overflow-auto rounded border border-zinc-800 bg-black/30 p-3 font-mono text-xs leading-5 text-zinc-200"
+              className="overflow-auto rounded border border-border bg-background p-3 font-mono text-xs leading-5 text-foreground"
             >
               <code>{block.content}</code>
             </pre>
@@ -444,7 +469,7 @@ function MarkdownContent({ content }: { content: string }) {
         }
         if (block.type === "heading") {
           return (
-            <h3 key={index} className="text-base font-semibold text-zinc-50">
+            <h3 key={index} className="text-base font-semibold text-foreground">
               {renderInlineMarkdown(block.content)}
             </h3>
           );
@@ -558,7 +583,7 @@ function renderInlineMarkdown(content: string): ReactNode[] {
     const token = match[0];
     if (token.startsWith("**")) {
       nodes.push(
-        <strong key={nodes.length} className="font-semibold text-zinc-50">
+        <strong key={nodes.length} className="font-semibold text-foreground">
           {token.slice(2, -2)}
         </strong>,
       );
@@ -566,7 +591,7 @@ function renderInlineMarkdown(content: string): ReactNode[] {
       nodes.push(
         <code
           key={nodes.length}
-          className="rounded bg-zinc-800 px-1 py-0.5 font-mono text-xs text-emerald-200"
+          className="rounded bg-panel-soft px-1 py-0.5 font-mono text-xs text-accent"
         >
           {token.slice(1, -1)}
         </code>,
@@ -586,7 +611,7 @@ function toolUseMessage(event: ToolUseEvent): ChatMessage {
   return {
     role: "tool",
     kind: "tool_use",
-    title: `Tool call: ${name}`,
+    title: `call · ${name}`,
     content: formatToolPayload(event.input ?? {}),
   };
 }
@@ -595,7 +620,7 @@ function toolResultMessage(event: ToolResultEvent): ChatMessage {
   return {
     role: "tool",
     kind: "tool_result",
-    title: event.is_error ? "Tool error" : "Tool result",
+    title: event.is_error ? "error" : "result",
     content: event.content ?? "",
     isError: event.is_error ?? false,
   };
@@ -614,7 +639,7 @@ function formatToolPayload(value: unknown): string {
 
 function SystemMessage({ content }: { content: string }) {
   return (
-    <div className="mx-auto rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-500">
+    <div className="mx-auto rounded border border-border bg-background px-3 py-2 font-mono text-xs text-muted">
       {content}
     </div>
   );
@@ -625,11 +650,11 @@ function UploadSummaryPanel({ upload }: { upload: UploadSummary }) {
 
   return (
     <div className="mt-4 space-y-4">
-      <div className="rounded border border-zinc-800 bg-zinc-950 p-3">
-        <div className="truncate text-sm font-medium text-zinc-100">
+      <div className="rounded border border-border bg-background p-3">
+        <div className="truncate text-sm font-medium text-foreground">
           {upload.filename}
         </div>
-        <div className="mt-1 font-mono text-xs text-emerald-300">
+        <div className="mt-1 font-mono text-xs text-accent">
           {upload.handle}
         </div>
         <dl className="mt-3 grid grid-cols-2 gap-3 text-sm">
@@ -639,14 +664,14 @@ function UploadSummaryPanel({ upload }: { upload: UploadSummary }) {
       </div>
 
       <div>
-        <h3 className="text-xs font-medium uppercase tracking-normal text-zinc-500">
+        <h3 className="font-mono text-xs font-medium uppercase tracking-wide text-muted">
           Columns
         </h3>
         <div className="mt-2 flex flex-wrap gap-2">
           {upload.columns.map((column) => (
             <span
               key={column}
-              className="max-w-full truncate rounded border border-zinc-700 px-2 py-1 font-mono text-xs text-zinc-300"
+              className="max-w-full truncate rounded border border-border px-2 py-1 font-mono text-xs text-muted"
               title={column}
             >
               {column}
@@ -656,19 +681,19 @@ function UploadSummaryPanel({ upload }: { upload: UploadSummary }) {
       </div>
 
       <div>
-        <h3 className="text-xs font-medium uppercase tracking-normal text-zinc-500">
+        <h3 className="font-mono text-xs font-medium uppercase tracking-wide text-muted">
           Preview
         </h3>
         {upload.preview.length > 0 ? (
-          <div className="mt-2 max-h-72 overflow-auto rounded border border-zinc-800">
+          <div className="mt-2 max-h-72 overflow-auto rounded border border-border">
             <table className="min-w-full table-fixed border-collapse text-left text-xs">
-              <thead className="sticky top-0 bg-zinc-900 text-zinc-400">
+              <thead className="sticky top-0 bg-panel text-muted">
                 <tr>
                   {previewColumns.map((column) => (
                     <th
                       key={column}
                       scope="col"
-                      className="w-32 border-b border-zinc-800 px-2 py-2 font-medium"
+                      className="w-32 border-b border-border px-2 py-2 font-mono font-medium"
                     >
                       <span className="block truncate" title={column}>
                         {column}
@@ -677,11 +702,11 @@ function UploadSummaryPanel({ upload }: { upload: UploadSummary }) {
                   ))}
                 </tr>
               </thead>
-              <tbody className="divide-y divide-zinc-800 bg-zinc-950">
+              <tbody className="divide-y divide-border bg-background">
                 {upload.preview.map((row, index) => (
                   <tr key={index}>
                     {previewColumns.map((column) => (
-                      <td key={column} className="px-2 py-2 text-zinc-300">
+                      <td key={column} className="px-2 py-2 text-foreground/80">
                         <span className="block truncate" title={formatCell(row[column])}>
                           {formatCell(row[column])}
                         </span>
@@ -693,7 +718,7 @@ function UploadSummaryPanel({ upload }: { upload: UploadSummary }) {
             </table>
           </div>
         ) : (
-          <div className="mt-2 rounded border border-dashed border-zinc-700 px-3 py-6 text-center text-sm text-zinc-500">
+          <div className="mt-2 rounded border border-dashed border-border px-3 py-6 text-center text-sm text-muted">
             No preview rows
           </div>
         )}
@@ -704,9 +729,11 @@ function UploadSummaryPanel({ upload }: { upload: UploadSummary }) {
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded border border-zinc-800 bg-zinc-950 p-3">
-      <dt className="text-xs text-zinc-500">{label}</dt>
-      <dd className="mt-1 truncate text-sm font-medium text-zinc-100">{value}</dd>
+    <div className="rounded border border-border bg-background p-3">
+      <dt className="font-mono text-xs text-muted">{label}</dt>
+      <dd className="mt-1 truncate font-mono text-sm font-medium text-foreground">
+        {value}
+      </dd>
     </div>
   );
 }
