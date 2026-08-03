@@ -92,12 +92,12 @@ _sessions: dict[str, SessionState] = {}
 
 
 def _make_agent_session() -> AsyncAgentSession:
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not configured.")
-    from data_harness.providers.openai import AsyncOpenAIAdapter
+        raise HTTPException(status_code=503, detail="DEEPSEEK_API_KEY is not configured.")
+    from data_harness.providers.openai import AsyncDeepSeekAdapter
 
-    adapter = AsyncOpenAIAdapter(model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
+    adapter = AsyncDeepSeekAdapter(model=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"))
     agent = AsyncAgent(
         adapter=adapter,
         system=(

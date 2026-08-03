@@ -16,9 +16,9 @@ newline-delimited JSON for the browser.
 Create `.env` in this directory:
 
 ```env
-OPENAI_API_KEY=...
+DEEPSEEK_API_KEY=...
 # optional
-OPENAI_MODEL=gpt-4o-mini
+DEEPSEEK_MODEL=deepseek-chat
 ```
 
 Then run:

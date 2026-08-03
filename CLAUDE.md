@@ -9,7 +9,7 @@ backend/    FastAPI · Python · data-harness
 
 ## Local setup
 
-**Backend** — requires `OPENAI_API_KEY` in `backend/.env`:
+**Backend** — requires `DEEPSEEK_API_KEY` in `backend/.env`:
 
 ```bash
 cd backend
@@ -59,7 +59,7 @@ uv run python -m pytest tests/ -v
 
 ## Key conventions
 
-- `OPENAI_API_KEY` is required. The backend returns `503` without it — no
+- `DEEPSEEK_API_KEY` is required. The backend returns `503` without it — no
   silent fallback.
 - CSV is the first data-source path; the app is not CSV-specific.
 - The frontend uses Next.js App Router with `"use client"` for interactive
