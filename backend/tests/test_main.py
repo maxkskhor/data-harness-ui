@@ -56,12 +56,20 @@ def _fake_session_key() -> SessionKeyChoice:
     return SessionKeyChoice(user_id=1, api_key=None, is_byok=False)
 
 
+def _fake_byok_session_key() -> SessionKeyChoice:
+    return SessionKeyChoice(user_id=None, api_key="sk-test", is_byok=True)
+
+
 @pytest.fixture
 def client():
     _rate_limit_hits.clear()
     app.dependency_overrides[resolve_session_key] = _fake_session_key
-    with TestClient(app) as c:
-        yield c
+    # _get_session's ownership check reads the real (cookie-backed) identity
+    # via auth.current_user_id; pin it to match _fake_session_key's user_id
+    # so tests exercise a session's owner, not a stranger.
+    with patch("main.auth.current_user_id", return_value=1):
+        with TestClient(app) as c:
+            yield c
     app.dependency_overrides.pop(resolve_session_key, None)
 
 
@@ -329,6 +337,75 @@ def test_rate_limit_blocks_excess_requests(client):
 def test_send_message_to_missing_session(client):
     resp = client.post("/sessions/nope/messages", json={"content": "hi"})
     assert resp.status_code == 404
+
+
+def test_rate_limit_uses_rightmost_forwarded_for(client):
+    # The leftmost XFF entry is client-supplied and trivially spoofable; the
+    # limiter must key on the rightmost (proxy-appended) one instead, or an
+    # attacker gets a fresh bucket on every request by varying the leftmost.
+    with patch("main._make_agent_session", return_value=_mock_agent_session()):
+        for i in range(20):
+            resp = client.post(
+                "/sessions", headers={"X-Forwarded-For": f"{i}.{i}.{i}.{i}, 9.9.9.9"}
+            )
+            assert resp.status_code == 200
+        blocked = client.post(
+            "/sessions", headers={"X-Forwarded-For": "255.255.255.255, 9.9.9.9"}
+        )
+    assert blocked.status_code == 429
+
+
+def test_budget_exhausted_blocks_new_session(client):
+    # The client fixture overrides resolve_session_key wholesale so most
+    # tests don't need real auth plumbing; this test needs the real
+    # dependency (with auth.current_user_id already patched to 1 by the
+    # fixture) to exercise its actual budget check.
+    app.dependency_overrides.pop(resolve_session_key, None)
+    try:
+        with patch("main.budget.remaining_budget_cents", return_value=0.0):
+            resp = client.post("/sessions")
+        assert resp.status_code == 402
+    finally:
+        app.dependency_overrides[resolve_session_key] = _fake_session_key
+
+
+def test_budget_exhausted_mid_session_blocks_message(client, session_id):
+    with patch("main.budget.remaining_budget_cents", return_value=0.0):
+        resp = client.post(
+            f"/sessions/{session_id}/messages", json={"content": "still going?"}
+        )
+    assert resp.status_code == 402
+
+
+def test_budget_exhausted_mid_session_blocks_stream(client, session_id):
+    with patch("main.budget.remaining_budget_cents", return_value=0.0):
+        resp = client.post(
+            f"/sessions/{session_id}/messages/stream", json={"content": "still going?"}
+        )
+    assert resp.status_code == 402
+
+
+def test_stranger_cannot_read_another_users_session(client, session_id):
+    # session_id was created as user 1 (the fixture's default identity).
+    # Anyone else authenticated as a different user must not be able to
+    # read it via a bare session id.
+    with patch("main.auth.current_user_id", return_value=2):
+        resp = client.get(f"/sessions/{session_id}")
+    assert resp.status_code == 404
+
+
+def test_byok_session_has_no_ownership_check(client):
+    app.dependency_overrides[resolve_session_key] = _fake_byok_session_key
+    try:
+        with patch("main._make_agent_session", return_value=_mock_agent_session()):
+            resp = client.post("/sessions")
+            sid = resp.json()["id"]
+    finally:
+        app.dependency_overrides[resolve_session_key] = _fake_session_key
+
+    with patch("main.auth.current_user_id", return_value=None):
+        resp = client.get(f"/sessions/{sid}")
+    assert resp.status_code == 200
 
 
 def test_max_turns_exceeded_returns_graceful_message(client):

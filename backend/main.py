@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import os
@@ -103,13 +104,17 @@ class SessionKeyChoice:
 
 
 def _allowed_origins() -> list[str]:
-    defaults = ["http://localhost:3000", "http://127.0.0.1:3000"]
     extra = [
         origin.strip()
         for origin in os.environ.get("ALLOWED_ORIGINS", "").split(",")
         if origin.strip()
     ]
-    return defaults + extra
+    # DATABASE_URL is only ever set in deployed environments (see db.py's
+    # sqlite fallback for local dev) — reuse that as the prod/dev signal so
+    # localhost isn't a permanently-credentialed CORS origin in production.
+    if os.environ.get("DATABASE_URL"):
+        return extra
+    return ["http://localhost:3000", "http://127.0.0.1:3000"] + extra
 
 
 @asynccontextmanager
@@ -153,9 +158,14 @@ _rate_limit_hits: dict[str, deque[float]] = defaultdict(deque)
 
 
 def _client_ip(request: Request) -> str:
+    # The leftmost X-Forwarded-For entry is whatever the client sent and is
+    # trivially spoofable. Render's own proxy appends the real connecting IP
+    # as the last hop, so that's the one to trust.
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
-        return forwarded.split(",")[0].strip()
+        parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+        if parts:
+            return parts[-1]
     return request.client.host if request.client else "unknown"
 
 
@@ -254,8 +264,8 @@ def create_session(choice: SessionKeyChoice = Depends(resolve_session_key)) -> S
     response_model=SessionResponse,
     dependencies=[Depends(rate_limit)],
 )
-def get_session(session_id: str) -> SessionResponse:
-    return _serialise_session(_get_session(session_id))
+def get_session(session_id: str, request: Request) -> SessionResponse:
+    return _serialise_session(_get_session(session_id, request))
 
 
 @app.post(
@@ -265,9 +275,10 @@ def get_session(session_id: str) -> SessionResponse:
 )
 async def upload_dataset(
     session_id: str,
+    request: Request,
     file: UploadFile = File(...),
 ) -> UploadSummary:
-    session = _get_session(session_id)
+    session = _get_session(session_id, request)
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Upload a CSV file first.")
 
@@ -310,10 +321,10 @@ async def upload_dataset(
     dependencies=[Depends(rate_limit)],
 )
 async def send_message(
-    session_id: str, request: ChatRequest, db: DbSession = Depends(get_db)
+    session_id: str, body: ChatRequest, request: Request, db: DbSession = Depends(get_db)
 ) -> ChatResponse:
-    session = _get_session(session_id)
-    content = request.content.strip()
+    session = _get_session(session_id, request)
+    content = body.content.strip()
     if not content:
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
     if len(content) > MAX_MESSAGE_LENGTH:
@@ -321,6 +332,12 @@ async def send_message(
             status_code=400,
             detail=f"Message too long (max {MAX_MESSAGE_LENGTH} characters).",
         )
+    if not session.is_byok and session.user_id is not None:
+        if budget.remaining_budget_cents(db, session.user_id) <= 0:
+            raise HTTPException(
+                status_code=402,
+                detail="Monthly shared budget used up. Add your own DeepSeek key to keep going.",
+            )
 
     session.messages.append(Message(role="user", content=content))
 
@@ -348,11 +365,12 @@ async def send_message(
 )
 async def stream_message(
     session_id: str,
-    request: ChatRequest,
+    body: ChatRequest,
+    request: Request,
     db: DbSession = Depends(get_db),
 ) -> StreamingResponse:
-    session = _get_session(session_id)
-    content = request.content.strip()
+    session = _get_session(session_id, request)
+    content = body.content.strip()
     if not content:
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
     if len(content) > MAX_MESSAGE_LENGTH:
@@ -360,6 +378,12 @@ async def stream_message(
             status_code=400,
             detail=f"Message too long (max {MAX_MESSAGE_LENGTH} characters).",
         )
+    if not session.is_byok and session.user_id is not None:
+        if budget.remaining_budget_cents(db, session.user_id) <= 0:
+            raise HTTPException(
+                status_code=402,
+                detail="Monthly shared budget used up. Add your own DeepSeek key to keep going.",
+            )
 
     session.messages.append(Message(role="user", content=content))
     chart_paths_before = {c.path for c in session.agent_session.cache.list_charts()}
@@ -394,9 +418,17 @@ async def stream_message(
                 if event_type == "chunk":
                     answer_parts.append(str(data))
                 yield _stream_event(event_type, data)
+        except asyncio.CancelledError:
+            # Client disconnected (e.g. the Stop button) or the connection
+            # dropped mid-stream. Tokens already generated were already
+            # billed by the provider, so record them before letting the
+            # cancellation propagate — don't swallow it.
+            record()
+            raise
         except Exception as exc:
             record()
-            answer = f"Agent error: {exc!r}."
+            print(f"stream_message error for session {session_id}: {exc!r}")
+            answer = "Agent error. Please try again."
             session.messages.append(Message(role="assistant", content=answer))
             yield _stream_event("error", answer)
             yield _stream_event("done", _serialise_session(session).model_dump())
@@ -449,11 +481,19 @@ def _serialise_session(session: SessionState) -> SessionResponse:
     )
 
 
-def _get_session(session_id: str) -> SessionState:
+def _get_session(session_id: str, request: Request) -> SessionState:
     try:
-        return _sessions[session_id]
+        session = _sessions[session_id]
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Session not found.") from exc
+    # BYOK sessions have no signed-in owner to check against. Non-BYOK
+    # sessions belong to whoever created them; a session id alone (a UUID,
+    # but still just a string in a request) shouldn't be a usable bearer
+    # token for someone else's uploaded data and chat history.
+    if not session.is_byok and session.user_id is not None:
+        if auth.current_user_id(request) != session.user_id:
+            raise HTTPException(status_code=404, detail="Session not found.")
+    return session
 
 
 def _normalise_handle(filename: str) -> str:
