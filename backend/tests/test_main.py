@@ -16,7 +16,7 @@ from data_harness.streaming import (
 from data_harness.types import ToolUseBlock
 from fastapi.testclient import TestClient
 
-from main import app, _normalise_handle
+from main import app, _normalise_handle, _rate_limit_hits
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +52,7 @@ def _csv_bytes(content: str = "a,b\n1,2\n3,4\n") -> bytes:
 
 @pytest.fixture
 def client():
+    _rate_limit_hits.clear()
     with TestClient(app) as c:
         yield c
 
@@ -298,6 +299,22 @@ def test_send_message_appends_to_history(client, session_id):
 def test_send_empty_message_rejected(client, session_id):
     resp = client.post(f"/sessions/{session_id}/messages", json={"content": "   "})
     assert resp.status_code == 400
+
+
+def test_send_oversized_message_rejected(client, session_id):
+    resp = client.post(
+        f"/sessions/{session_id}/messages", json={"content": "x" * 2001}
+    )
+    assert resp.status_code == 400
+
+
+def test_rate_limit_blocks_excess_requests(client):
+    with patch("main._make_agent_session", return_value=_mock_agent_session()):
+        for _ in range(20):
+            resp = client.post("/sessions")
+            assert resp.status_code == 200
+        blocked = client.post("/sessions")
+    assert blocked.status_code == 429
 
 
 def test_send_message_to_missing_session(client):

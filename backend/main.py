@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import io
 import os
 import re
+import time
 import uuid
 import json
 import inspect
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import AsyncGenerator
@@ -22,7 +25,7 @@ from data_harness.streaming import (
 )
 from data_harness.types import ToolUseBlock
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -90,6 +93,34 @@ app.add_middleware(
 
 _sessions: dict[str, SessionState] = {}
 
+# Every request here spends real tokens against a shared API key, so a
+# cheap per-IP rate limit and input size caps sit in front of the
+# cost-generating endpoints as a first line of defense. This is not a
+# substitute for auth or provider-side spend limits, just a floor.
+MAX_MESSAGE_LENGTH = 2000
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+_RATE_LIMIT_WINDOW_SECONDS = 600
+_RATE_LIMIT_MAX_REQUESTS = 20
+_rate_limit_hits: dict[str, deque[float]] = defaultdict(deque)
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def rate_limit(request: Request) -> None:
+    ip = _client_ip(request)
+    now = time.monotonic()
+    hits = _rate_limit_hits[ip]
+    while hits and now - hits[0] > _RATE_LIMIT_WINDOW_SECONDS:
+        hits.popleft()
+    if len(hits) >= _RATE_LIMIT_MAX_REQUESTS:
+        raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
+    hits.append(now)
+
 
 def _make_agent_session() -> AsyncAgentSession:
     api_key = os.environ.get("DEEPSEEK_API_KEY")
@@ -115,7 +146,7 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/sessions", response_model=SessionResponse)
+@app.post("/sessions", response_model=SessionResponse, dependencies=[Depends(rate_limit)])
 def create_session() -> SessionResponse:
     session = SessionState(
         id=str(uuid.uuid4()),
@@ -130,7 +161,11 @@ def get_session(session_id: str) -> SessionResponse:
     return _serialise_session(_get_session(session_id))
 
 
-@app.post("/sessions/{session_id}/uploads", response_model=UploadSummary)
+@app.post(
+    "/sessions/{session_id}/uploads",
+    response_model=UploadSummary,
+    dependencies=[Depends(rate_limit)],
+)
 async def upload_dataset(
     session_id: str,
     file: UploadFile = File(...),
@@ -139,8 +174,15 @@ async def upload_dataset(
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Upload a CSV file first.")
 
+    raw = await file.read()
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"CSV too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB for this demo).",
+        )
+
     try:
-        df = pd.read_csv(file.file)
+        df = pd.read_csv(io.BytesIO(raw))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not read CSV: {exc}") from exc
 
@@ -165,12 +207,21 @@ async def upload_dataset(
     return summary
 
 
-@app.post("/sessions/{session_id}/messages", response_model=ChatResponse)
+@app.post(
+    "/sessions/{session_id}/messages",
+    response_model=ChatResponse,
+    dependencies=[Depends(rate_limit)],
+)
 async def send_message(session_id: str, request: ChatRequest) -> ChatResponse:
     session = _get_session(session_id)
     content = request.content.strip()
     if not content:
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
+    if len(content) > MAX_MESSAGE_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Message too long (max {MAX_MESSAGE_LENGTH} characters).",
+        )
 
     session.messages.append(Message(role="user", content=content))
 
@@ -190,7 +241,10 @@ async def send_message(session_id: str, request: ChatRequest) -> ChatResponse:
     )
 
 
-@app.post("/sessions/{session_id}/messages/stream")
+@app.post(
+    "/sessions/{session_id}/messages/stream",
+    dependencies=[Depends(rate_limit)],
+)
 async def stream_message(
     session_id: str,
     request: ChatRequest,
@@ -199,6 +253,11 @@ async def stream_message(
     content = request.content.strip()
     if not content:
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
+    if len(content) > MAX_MESSAGE_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Message too long (max {MAX_MESSAGE_LENGTH} characters).",
+        )
 
     session.messages.append(Message(role="user", content=content))
 
