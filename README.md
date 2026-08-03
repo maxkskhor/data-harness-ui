@@ -167,7 +167,8 @@ not "nothing happened."
 ## Security posture
 
 Ordered by how much protection each layer actually provides, strongest
-first (audited 2026-08-03):
+first (audited 2026-08-03, re-audited same day by an independent review with
+no prior context — see below):
 
 1. **DeepSeek's own balance is the real ceiling.** It's prepaid — you top up
    a balance, calls hard-fail at $0. No bug anywhere in this app's code can
@@ -178,14 +179,33 @@ first (audited 2026-08-03):
    charge. Neon likewise has no card on file.
 3. **Auth + budget metering** (above) stops a stranger from quietly running
    up spend on the shared key — using the app at all now requires GitHub
-   sign-in or a self-supplied key.
+   sign-in or a self-supplied key, re-checked on every message (not just at
+   session creation).
 4. **Per-IP rate limiting** (`backend/main.py`, 20 requests / 10 min) and
    input size caps (2000-char messages, 5MB CSV uploads) sit in front of
    every cost-generating endpoint as a floor under the other layers.
+5. **Session ownership.** A session id alone is no longer a usable bearer
+   token for someone else's uploaded data and chat history — non-BYOK
+   sessions check the caller's identity against the session's owner.
 
-None of layers 3–4 are a substitute for layer 1–2. They raise the cost of
+None of layers 3–5 are a substitute for layer 1–2. They raise the cost of
 abuse; only the provider/platform account state makes a bad outcome
 structurally impossible.
+
+**Independent review (2026-08-03):** an Opus review with a fresh read of the
+code (no memory of how it was built) found that layers 3–4 above were
+mostly decorative at the time — budget was checked once at session
+creation and never again per message, the rate limiter trusted a
+client-spoofable header, and cancelling a stream (the Stop button) silently
+dropped the usage record for tokens already billed by the provider. All
+fixed same-day, with regression tests added for each. The rate-limit fix
+also went through two iterations — the first ("trust the rightmost
+`X-Forwarded-For` hop") turned out to be wrong too, verified live against
+production: Render's own internal load balancer adds an unpredictable
+further hop after Cloudflare's. The working fix uses `CF-Connecting-IP`,
+which Cloudflare sets unconditionally and overwrites on any client-supplied
+value — verified that Cloudflare itself rejects a spoofed one outright
+(403, `error code: 1000`) before it ever reaches the app.
 
 ## Operational procedures
 
