@@ -241,7 +241,11 @@ def create_session(choice: SessionKeyChoice = Depends(resolve_session_key)) -> S
     return _serialise_session(session)
 
 
-@app.get("/sessions/{session_id}", response_model=SessionResponse)
+@app.get(
+    "/sessions/{session_id}",
+    response_model=SessionResponse,
+    dependencies=[Depends(rate_limit)],
+)
 def get_session(session_id: str) -> SessionResponse:
     return _serialise_session(_get_session(session_id))
 
