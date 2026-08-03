@@ -19,6 +19,7 @@ import {
   StreamAborted,
   streamMessage,
   uploadDataset,
+  type ChartEvent,
   type ChatMessage,
   type Me,
   type Session,
@@ -227,6 +228,8 @@ export default function WorkbenchPage() {
             appendToolMessage(session.id, toolUseMessage(chunk.data));
           } else if (chunk.type === "tool_result") {
             appendToolMessage(session.id, toolResultMessage(chunk.data));
+          } else if (chunk.type === "chart") {
+            appendToolMessage(session.id, chartMessage(chunk.data));
           } else {
             setError(chunk.data);
           }
@@ -539,6 +542,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
   }
 
   const isUser = message.role === "user";
+  const isChart = Boolean(message.image_base64);
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div
@@ -553,11 +557,30 @@ function MessageBubble({ message }: { message: ChatMessage }) {
         </div>
         {isUser ? (
           <p className="whitespace-pre-wrap break-words">{message.content}</p>
+        ) : isChart ? (
+          <ChartImage message={message} />
         ) : (
           <MarkdownContent content={message.content} />
         )}
       </div>
     </div>
+  );
+}
+
+function ChartImage({ message }: { message: ChatMessage }) {
+  return (
+    <figure>
+      <img
+        src={`data:image/${message.image_format ?? "png"};base64,${message.image_base64}`}
+        alt={message.image_title ?? "Chart"}
+        className="max-w-full rounded border border-border"
+      />
+      {message.image_title ? (
+        <figcaption className="mt-1 text-xs text-muted">
+          {message.image_title}
+        </figcaption>
+      ) : null}
+    </figure>
   );
 }
 
@@ -761,6 +784,16 @@ function toolResultMessage(event: ToolResultEvent): ChatMessage {
     title: event.is_error ? "error" : "result",
     content: event.content ?? "",
     isError: event.is_error ?? false,
+  };
+}
+
+function chartMessage(event: ChartEvent): ChatMessage {
+  return {
+    role: "assistant",
+    content: "",
+    image_base64: event.base64,
+    image_format: event.format,
+    image_title: event.title ?? null,
   };
 }
 

@@ -39,8 +39,8 @@ def _mock_agent_session(answer: str = "mocked answer") -> MagicMock:
         yield answer
 
     session.ask_stream = ask_stream
-    # cache.get used nowhere in the new code, but keep it available
     session.cache = MagicMock()
+    session.cache.list_charts = MagicMock(return_value=[])
     return session
 
 
@@ -229,10 +229,8 @@ def test_stream_message_forwards_tool_events(client):
     assert '"type": "chunk"' in events[2]
     assert '"type": "done"' in events[3]
     history = client.get(f"/sessions/{sid}").json()["messages"]
-    assert history[-1] == {
-        "role": "assistant",
-        "content": "# Result\nThe table has **2 rows**.",
-    }
+    assert history[-1]["role"] == "assistant"
+    assert history[-1]["content"] == "# Result\nThe table has **2 rows**."
 
 
 def test_stream_message_maps_data_harness_stream_events(client):
@@ -282,7 +280,8 @@ def test_stream_message_maps_data_harness_stream_events(client):
     assert '"- Done"' in events[3]
     assert '"type": "done"' in events[4]
     history = client.get(f"/sessions/{sid}").json()["messages"]
-    assert history[-1] == {"role": "assistant", "content": "# Summary\n- Done"}
+    assert history[-1]["role"] == "assistant"
+    assert history[-1]["content"] == "# Summary\n- Done"
 
 
 def test_stream_message_appends_to_history(client, session_id):
@@ -290,8 +289,10 @@ def test_stream_message_appends_to_history(client, session_id):
 
     assert resp.status_code == 200
     history = client.get(f"/sessions/{session_id}").json()["messages"]
-    assert history[-2] == {"role": "user", "content": "go"}
-    assert history[-1] == {"role": "assistant", "content": "mocked answer"}
+    assert history[-2]["role"] == "user"
+    assert history[-2]["content"] == "go"
+    assert history[-1]["role"] == "assistant"
+    assert history[-1]["content"] == "mocked answer"
 
 
 def test_send_message_appends_to_history(client, session_id):

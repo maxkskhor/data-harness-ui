@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import io
 import os
 import re
@@ -49,6 +50,9 @@ MessageRole = Literal["user", "assistant"]
 class Message(BaseModel):
     role: MessageRole
     content: str
+    image_base64: str | None = None
+    image_format: str | None = None
+    image_title: str | None = None
 
 
 class UploadSummary(BaseModel):
@@ -181,7 +185,11 @@ def _make_agent_session(api_key: str | None = None) -> AsyncAgentSession:
         system=(
             "You are a precise data analyst in a local data workbench. "
             "Use Python for calculations, dataframe inspection, and "
-            "evidence-backed answers. Answer in concise, readable Markdown."
+            "evidence-backed answers. Answer in concise, readable Markdown. "
+            "matplotlib is available for charts: build a normal matplotlib "
+            "figure (e.g. plt.plot/plt.bar + plt.title) and it is captured "
+            "and shown to the user automatically — no need to save it "
+            "yourself or fall back to text-rendered charts."
         ),
         max_turns=10,
     )
@@ -354,6 +362,7 @@ async def stream_message(
         )
 
     session.messages.append(Message(role="user", content=content))
+    chart_paths_before = {c.path for c in session.agent_session.cache.list_charts()}
 
     async def events() -> AsyncGenerator[str, None]:
         answer_parts: list[str] = []
@@ -402,6 +411,31 @@ async def stream_message(
             answer = "The agent returned no response. Check that the API key and model are valid."
             yield _stream_event("error", answer)
         session.messages.append(Message(role="assistant", content=answer))
+
+        for chart in session.agent_session.cache.list_charts():
+            if chart.path in chart_paths_before:
+                continue
+            try:
+                encoded = base64.b64encode(chart.read_bytes()).decode("ascii")
+            except OSError:
+                continue
+            chart_message = Message(
+                role="assistant",
+                content="",
+                image_base64=encoded,
+                image_format=chart.format,
+                image_title=chart.title,
+            )
+            session.messages.append(chart_message)
+            yield _stream_event(
+                "chart",
+                {
+                    "base64": encoded,
+                    "format": chart.format,
+                    "title": chart.title,
+                },
+            )
+
         yield _stream_event("done", _serialise_session(session).model_dump())
 
     return StreamingResponse(events(), media_type="application/x-ndjson")

@@ -4,6 +4,9 @@ export type ChatMessage = {
   kind?: "tool_use" | "tool_result";
   title?: string;
   isError?: boolean;
+  image_base64?: string | null;
+  image_format?: string | null;
+  image_title?: string | null;
 };
 
 export type UploadSummary = {
@@ -97,6 +100,7 @@ type StreamEvent =
   | { type: "chunk"; data: string }
   | { type: "tool_use"; data: ToolUseEvent }
   | { type: "tool_result"; data: ToolResultEvent }
+  | { type: "chart"; data: ChartEvent }
   | { type: "error"; data: string }
   | { type: "done"; data: Session };
 
@@ -110,6 +114,12 @@ export type ToolResultEvent = {
   id?: string;
   content?: string;
   is_error?: boolean;
+};
+
+export type ChartEvent = {
+  base64: string;
+  format: string;
+  title?: string | null;
 };
 
 export class StreamAborted extends Error {}
