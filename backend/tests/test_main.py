@@ -339,20 +339,36 @@ def test_send_message_to_missing_session(client):
     assert resp.status_code == 404
 
 
-def test_rate_limit_uses_rightmost_forwarded_for(client):
-    # The leftmost XFF entry is client-supplied and trivially spoofable; the
-    # limiter must key on the rightmost (proxy-appended) one instead, or an
-    # attacker gets a fresh bucket on every request by varying the leftmost.
+def test_rate_limit_ignores_spoofable_forwarded_for(client):
+    # X-Forwarded-For must NOT be trusted at all here (Render's own proxy
+    # chain has an unpredictable number of hops - see _client_ip). A client
+    # varying it should still land in one bucket, keyed off the transport
+    # connection (or CF-Connecting-IP, checked separately below).
     with patch("main._make_agent_session", return_value=_mock_agent_session()):
         for i in range(20):
             resp = client.post(
-                "/sessions", headers={"X-Forwarded-For": f"{i}.{i}.{i}.{i}, 9.9.9.9"}
+                "/sessions", headers={"X-Forwarded-For": f"{i}.{i}.{i}.{i}"}
             )
             assert resp.status_code == 200
         blocked = client.post(
-            "/sessions", headers={"X-Forwarded-For": "255.255.255.255, 9.9.9.9"}
+            "/sessions", headers={"X-Forwarded-For": "255.255.255.255"}
         )
     assert blocked.status_code == 429
+
+
+def test_rate_limit_keys_on_cf_connecting_ip(client):
+    # CF-Connecting-IP is the one header Cloudflare sets unconditionally and
+    # a client can't override - two different values must get independent
+    # buckets, and each bucket enforces its own limit.
+    with patch("main._make_agent_session", return_value=_mock_agent_session()):
+        for _ in range(20):
+            resp = client.post("/sessions", headers={"CF-Connecting-IP": "1.1.1.1"})
+            assert resp.status_code == 200
+        blocked = client.post("/sessions", headers={"CF-Connecting-IP": "1.1.1.1"})
+        assert blocked.status_code == 429
+
+        other = client.post("/sessions", headers={"CF-Connecting-IP": "2.2.2.2"})
+        assert other.status_code == 200
 
 
 def test_budget_exhausted_blocks_new_session(client):

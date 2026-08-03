@@ -158,14 +158,21 @@ _rate_limit_hits: dict[str, deque[float]] = defaultdict(deque)
 
 
 def _client_ip(request: Request) -> str:
-    # The leftmost X-Forwarded-For entry is whatever the client sent and is
-    # trivially spoofable. Render's own proxy appends the real connecting IP
-    # as the last hop, so that's the one to trust.
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        parts = [p.strip() for p in forwarded.split(",") if p.strip()]
-        if parts:
-            return parts[-1]
+    # Render sits behind Cloudflare, which sets CF-Connecting-IP to the true
+    # origin client and overwrites any client-supplied value — unspoofable,
+    # and unambiguous regardless of how many internal hops sit behind it.
+    #
+    # X-Forwarded-For is NOT a safe fallback here: verified live (2026-08)
+    # that Render's own internal load balancer adds a further hop after
+    # Cloudflare's, and that hop rotates across several internal IPs even
+    # for requests from one real client — so "trust the rightmost entry"
+    # (the naive fix for "don't trust the client-supplied leftmost entry")
+    # is unstable in this specific multi-proxy setup. Prefer the header a
+    # trusted edge sets unconditionally over parsing a chain of unknown
+    # length.
+    cf_ip = request.headers.get("cf-connecting-ip")
+    if cf_ip:
+        return cf_ip.strip()
     return request.client.host if request.client else "unknown"
 
 
