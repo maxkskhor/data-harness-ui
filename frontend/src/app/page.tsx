@@ -16,6 +16,7 @@ import {
   githubLoginUrl,
   getSession,
   logout as apiLogout,
+  StreamAborted,
   streamMessage,
   uploadDataset,
   type ChatMessage,
@@ -53,6 +54,7 @@ export default function WorkbenchPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const latestUpload = session?.uploads.at(-1) ?? null;
   const messageCount = session?.messages.length ?? 0;
@@ -212,31 +214,47 @@ export default function WorkbenchPage() {
           }
         : current,
     );
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     try {
-      const nextSession = await streamMessage(session.id, content, (chunk) => {
-        if (chunk.type === "chunk") {
-          appendAssistantChunk(session.id, chunk.data);
-        } else if (chunk.type === "tool_use") {
-          appendToolMessage(session.id, toolUseMessage(chunk.data));
-        } else if (chunk.type === "tool_result") {
-          appendToolMessage(session.id, toolResultMessage(chunk.data));
-        } else {
-          setError(chunk.data);
-        }
-      });
+      const nextSession = await streamMessage(
+        session.id,
+        content,
+        (chunk) => {
+          if (chunk.type === "chunk") {
+            appendAssistantChunk(session.id, chunk.data);
+          } else if (chunk.type === "tool_use") {
+            appendToolMessage(session.id, toolUseMessage(chunk.data));
+          } else if (chunk.type === "tool_result") {
+            appendToolMessage(session.id, toolResultMessage(chunk.data));
+          } else {
+            setError(chunk.data);
+          }
+        },
+        controller.signal,
+      );
       setSession((current) =>
         current && current.id === nextSession.id
           ? { ...nextSession, messages: current.messages }
           : nextSession,
       );
     } catch (err) {
-      setDraft(content);
-      setError(errorMessage(err));
-      setSession(await getSession(session.id).catch(() => session));
+      if (err instanceof StreamAborted) {
+        // User-initiated stop: keep whatever streamed in so far, no error.
+      } else {
+        setDraft(content);
+        setError(errorMessage(err));
+        setSession(await getSession(session.id).catch(() => session));
+      }
     } finally {
+      abortControllerRef.current = null;
       setIsSending(false);
       textareaRef.current?.focus();
     }
+  }
+
+  function handleStop() {
+    abortControllerRef.current?.abort();
   }
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -468,13 +486,23 @@ export default function WorkbenchPage() {
                   disabled={!isSessionReady || isSending}
                   className="min-h-11 flex-1 resize-none bg-transparent px-2 py-2 text-sm text-foreground outline-none placeholder:text-muted disabled:cursor-not-allowed"
                 />
-                <button
-                  type="submit"
-                  disabled={!isSessionReady || !draft.trim() || isSending}
-                  className="h-10 rounded bg-accent px-4 text-sm font-semibold text-accent-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:bg-panel-soft disabled:text-muted"
-                >
-                  Send
-                </button>
+                {isSending ? (
+                  <button
+                    type="button"
+                    onClick={handleStop}
+                    className="h-10 rounded border border-danger/40 bg-danger-soft px-4 text-sm font-semibold text-danger transition hover:opacity-90"
+                  >
+                    Stop
+                  </button>
+                ) : (
+                  <button
+                    type="submit"
+                    disabled={!isSessionReady || !draft.trim()}
+                    className="h-10 rounded bg-accent px-4 text-sm font-semibold text-accent-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:bg-panel-soft disabled:text-muted"
+                  >
+                    Send
+                  </button>
+                )}
               </form>
             </div>
           </section>

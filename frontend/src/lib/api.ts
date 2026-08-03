@@ -112,10 +112,13 @@ export type ToolResultEvent = {
   is_error?: boolean;
 };
 
+export class StreamAborted extends Error {}
+
 export async function streamMessage(
   sessionId: string,
   content: string,
   onEvent: (event: Exclude<StreamEvent, { type: "done" }>) => void,
+  signal?: AbortSignal,
 ): Promise<Session> {
   const response = await fetch(
     `${API_BASE_URL}/sessions/${sessionId}/messages/stream`,
@@ -124,6 +127,7 @@ export async function streamMessage(
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ content }),
+      signal,
     },
   );
 
@@ -143,7 +147,17 @@ export async function streamMessage(
   let finalSession: Session | null = null;
 
   while (true) {
-    const { done, value } = await reader.read();
+    let done: boolean;
+    let value: Uint8Array | undefined;
+    try {
+      ({ done, value } = await reader.read());
+    } catch (err) {
+      if (signal?.aborted) {
+        await reader.cancel().catch(() => undefined);
+        throw new StreamAborted("Streaming was stopped.");
+      }
+      throw err;
+    }
     if (done) {
       break;
     }
