@@ -20,11 +20,21 @@ export type Session = {
   uploads: UploadSummary[];
 };
 
+export type Me = {
+  login: string | null;
+  avatar_url: string | null;
+  budget_remaining_cents: number | null;
+  budget_total_cents: number;
+};
+
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, init);
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    credentials: "include",
+    ...init,
+  });
   if (!response.ok) {
     const body = await response.json().catch(() => null);
     const detail = body?.detail ?? `Request failed with ${response.status}`;
@@ -33,8 +43,23 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export function createSession(): Promise<Session> {
-  return request<Session>("/sessions", { method: "POST" });
+export function getMe(): Promise<Me> {
+  return request<Me>("/auth/me");
+}
+
+export function githubLoginUrl(): string {
+  return `${API_BASE_URL}/auth/github/login`;
+}
+
+export function logout(): Promise<void> {
+  return request("/auth/logout", { method: "POST" });
+}
+
+export function createSession(byokKey?: string): Promise<Session> {
+  return request<Session>("/sessions", {
+    method: "POST",
+    headers: byokKey ? { "X-User-Deepseek-Key": byokKey } : undefined,
+  });
 }
 
 export function getSession(sessionId: string): Promise<Session> {
@@ -96,6 +121,7 @@ export async function streamMessage(
     `${API_BASE_URL}/sessions/${sessionId}/messages/stream`,
     {
       method: "POST",
+      credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ content }),
     },

@@ -12,10 +12,14 @@ import {
 } from "react";
 import {
   createSession,
+  getMe,
+  githubLoginUrl,
   getSession,
+  logout as apiLogout,
   streamMessage,
   uploadDataset,
   type ChatMessage,
+  type Me,
   type Session,
   type ToolResultEvent,
   type ToolUseEvent,
@@ -23,6 +27,9 @@ import {
 } from "@/lib/api";
 
 type SessionStatus = "starting" | "ready" | "error";
+type AuthStatus = "loading" | "ready";
+
+const BYOK_STORAGE_KEY = "data-harness-byok-key";
 
 const QUICK_QUESTIONS = [
   "What columns are in this?",
@@ -30,6 +37,11 @@ const QUICK_QUESTIONS = [
 ];
 
 export default function WorkbenchPage() {
+  const [me, setMe] = useState<Me | null>(null);
+  const [authStatus, setAuthStatus] = useState<AuthStatus>("loading");
+  const [byokKey, setByokKey] = useState<string | null>(null);
+  const [byokDraft, setByokDraft] = useState("");
+
   const [session, setSession] = useState<Session | null>(null);
   const [sessionStatus, setSessionStatus] =
     useState<SessionStatus>("starting");
@@ -46,6 +58,7 @@ export default function WorkbenchPage() {
   const messageCount = session?.messages.length ?? 0;
   const isSessionReady = sessionStatus === "ready" && session !== null;
   const isBusy = sessionStatus === "starting" || isUploading || isSending;
+  const canUseApp = Boolean(me?.login) || Boolean(byokKey);
 
   const statusLabel = useMemo(() => {
     if (sessionStatus === "starting") {
@@ -58,13 +71,40 @@ export default function WorkbenchPage() {
   }, [sessionStatus]);
 
   useEffect(() => {
+    setByokKey(sessionStorage.getItem(BYOK_STORAGE_KEY));
+    let isMounted = true;
+    getMe()
+      .then((next) => {
+        if (isMounted) {
+          setMe(next);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setMe(null);
+        }
+      })
+      .finally(() => {
+        if (isMounted) {
+          setAuthStatus("ready");
+        }
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (authStatus !== "ready" || !canUseApp) {
+      return;
+    }
     let isMounted = true;
 
     async function startSession() {
       try {
         setSessionStatus("starting");
         setError(null);
-        const nextSession = await createSession();
+        const nextSession = await createSession(byokKey ?? undefined);
         if (!isMounted) {
           return;
         }
@@ -84,7 +124,7 @@ export default function WorkbenchPage() {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [authStatus, canUseApp, byokKey]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: "end" });
@@ -96,13 +136,35 @@ export default function WorkbenchPage() {
     setSessionStatus("starting");
     setError(null);
     try {
-      const nextSession = await createSession();
+      const nextSession = await createSession(byokKey ?? undefined);
       setSession(nextSession);
       setSessionStatus("ready");
     } catch (err) {
       setSessionStatus("error");
       setError(errorMessage(err));
     }
+  }
+
+  function saveByokKey(key: string) {
+    const trimmed = key.trim();
+    if (!trimmed) {
+      return;
+    }
+    sessionStorage.setItem(BYOK_STORAGE_KEY, trimmed);
+    setByokKey(trimmed);
+    setByokDraft("");
+  }
+
+  function clearByokKey() {
+    sessionStorage.removeItem(BYOK_STORAGE_KEY);
+    setByokKey(null);
+  }
+
+  async function handleSignOut() {
+    await apiLogout().catch(() => undefined);
+    setMe(null);
+    setSession(null);
+    setSessionStatus("starting");
   }
 
   async function handleUpload(event: ChangeEvent<HTMLInputElement>) {
@@ -223,6 +285,24 @@ export default function WorkbenchPage() {
     });
   }
 
+  if (authStatus === "loading") {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-background text-foreground">
+        <p className="font-mono text-xs text-muted">Checking sign-in status...</p>
+      </main>
+    );
+  }
+
+  if (!canUseApp) {
+    return (
+      <AuthGate
+        byokDraft={byokDraft}
+        onByokDraftChange={setByokDraft}
+        onSaveKey={saveByokKey}
+      />
+    );
+  }
+
   return (
     <main className="min-h-screen bg-background text-foreground">
       <div className="flex min-h-screen flex-col">
@@ -242,6 +322,12 @@ export default function WorkbenchPage() {
               </p>
             </div>
             <div className="flex items-center gap-3 font-mono text-xs text-muted">
+              <AccountCluster
+                me={me}
+                byokActive={Boolean(byokKey)}
+                onSignOut={handleSignOut}
+                onClearKey={clearByokKey}
+              />
               <span className="flex items-center gap-2">
                 <span
                   className={`h-2 w-2 rounded-full ${
@@ -321,8 +407,32 @@ export default function WorkbenchPage() {
 
             <div className="border-t border-border bg-background/70 p-4">
               {error ? (
-                <div className="mb-3 rounded border border-danger/40 bg-danger-soft px-3 py-2 text-sm text-danger">
-                  {error}
+                <div className="mb-3 space-y-2 rounded border border-danger/40 bg-danger-soft px-3 py-2 text-sm text-danger">
+                  <p>{error}</p>
+                  {error.toLowerCase().includes("budget") ? (
+                    <form
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        saveByokKey(byokDraft);
+                      }}
+                      className="flex gap-2"
+                    >
+                      <input
+                        type="password"
+                        value={byokDraft}
+                        onChange={(event) => setByokDraft(event.target.value)}
+                        placeholder="Paste a DeepSeek key to keep going"
+                        className="h-8 flex-1 rounded border border-danger/40 bg-background px-2 text-xs text-foreground outline-none placeholder:text-muted"
+                      />
+                      <button
+                        type="submit"
+                        disabled={!byokDraft.trim()}
+                        className="h-8 rounded border border-danger/40 px-2 text-xs text-danger disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Use key
+                      </button>
+                    </form>
+                  ) : null}
                 </div>
               ) : null}
 
@@ -761,4 +871,132 @@ function formatCell(value: unknown): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Something went wrong.";
+}
+
+function AuthGate({
+  byokDraft,
+  onByokDraftChange,
+  onSaveKey,
+}: {
+  byokDraft: string;
+  onByokDraftChange: (value: string) => void;
+  onSaveKey: (key: string) => void;
+}) {
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-background px-4 text-foreground">
+      <div className="w-full max-w-sm rounded-lg border border-border bg-panel p-6">
+        <h1 className="font-mono text-sm font-semibold uppercase tracking-wide text-foreground">
+          Data Harness
+        </h1>
+        <p className="mt-1 text-xs text-muted">
+          Ask questions of a CSV. Python sandboxed, no bash.
+        </p>
+
+        <a
+          href={githubLoginUrl()}
+          className="mt-6 flex h-10 items-center justify-center rounded bg-accent text-sm font-semibold text-accent-foreground transition hover:opacity-90"
+        >
+          Sign in with GitHub
+        </a>
+        <p className="mt-2 text-center text-xs text-muted">
+          Gives you a small shared budget on the house.
+        </p>
+
+        <div className="my-5 flex items-center gap-3 text-xs text-muted">
+          <span className="h-px flex-1 bg-border" />
+          or
+          <span className="h-px flex-1 bg-border" />
+        </div>
+
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSaveKey(byokDraft);
+          }}
+          className="space-y-2"
+        >
+          <label className="block text-xs text-muted">
+            Bring your own DeepSeek API key
+          </label>
+          <input
+            type="password"
+            value={byokDraft}
+            onChange={(event) => onByokDraftChange(event.target.value)}
+            placeholder="sk-..."
+            className="h-10 w-full rounded border border-border bg-background px-3 text-sm text-foreground outline-none placeholder:text-muted focus:border-accent"
+          />
+          <button
+            type="submit"
+            disabled={!byokDraft.trim()}
+            className="h-9 w-full rounded border border-border text-sm text-foreground transition hover:border-accent hover:bg-panel-soft disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Use this key
+          </button>
+          <p className="text-xs text-muted">
+            Kept in this browser tab only, sent per request, never stored on
+            the server.
+          </p>
+        </form>
+      </div>
+    </main>
+  );
+}
+
+function AccountCluster({
+  me,
+  byokActive,
+  onSignOut,
+  onClearKey,
+}: {
+  me: Me | null;
+  byokActive: boolean;
+  onSignOut: () => void;
+  onClearKey: () => void;
+}) {
+  if (byokActive) {
+    return (
+      <span className="flex items-center gap-2">
+        <span className="rounded border border-accent/40 px-1.5 py-0.5 text-accent">
+          byok
+        </span>
+        <button
+          type="button"
+          onClick={onClearKey}
+          className="text-muted underline-offset-2 hover:text-foreground hover:underline"
+        >
+          clear key
+        </button>
+      </span>
+    );
+  }
+
+  if (!me?.login) {
+    return null;
+  }
+
+  const remaining = me.budget_remaining_cents ?? 0;
+  const low = remaining <= me.budget_total_cents * 0.1;
+
+  return (
+    <span className="flex items-center gap-2">
+      {me.avatar_url ? (
+        <img
+          src={me.avatar_url}
+          alt={me.login}
+          className="h-4 w-4 rounded-full"
+        />
+      ) : null}
+      <span className="text-foreground">{me.login}</span>
+      <span className={low ? "text-danger" : "text-muted"}>
+        ${(remaining / 100).toFixed(2)} left
+      </span>
+      <button
+        type="button"
+        onClick={onSignOut}
+        className="text-muted underline-offset-2 hover:text-foreground hover:underline"
+      >
+        sign out
+      </button>
+    </span>
+  );
 }

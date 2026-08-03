@@ -9,7 +9,9 @@ backend/    FastAPI · Python · data-harness
 
 ## Local setup
 
-**Backend** — requires `DEEPSEEK_API_KEY` in `backend/.env`:
+**Backend** — requires `DEEPSEEK_API_KEY` in `backend/.env`; see
+[`backend/README.md`](backend/README.md) for the full env var list (GitHub
+OAuth, `DATABASE_URL`, session secret):
 
 ```bash
 cd backend
@@ -35,14 +37,25 @@ Sessions are currently in-memory. Each session holds one `AgentSession` from
 the `data-harness` library, imported in Python as `data_harness`, which manages
 conversation history and the data cache.
 
+Identity and monthly spend are the exception: those live in Postgres
+(`db.py`/`budget.py`) so they survive a restart even though chat sessions
+don't. A session runs on the shared `DEEPSEEK_API_KEY` (requires GitHub
+sign-in + remaining budget) or a caller-supplied BYOK key
+(`X-User-Deepseek-Key`, never persisted, bypasses the budget entirely).
+
 ### Backend API
 
 ```
 GET  /health
+GET  /auth/me
+GET  /auth/github/login
+GET  /auth/github/callback
+POST /auth/logout
 POST /sessions
 GET  /sessions/{session_id}
 POST /sessions/{session_id}/uploads
 POST /sessions/{session_id}/messages
+POST /sessions/{session_id}/messages/stream
 ```
 
 ### Frontend API boundary

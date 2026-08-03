@@ -5,6 +5,7 @@ import io
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from data_harness.result import Usage
 from data_harness.streaming import (
     ContentBlockDeltaEvent,
     ContentBlockStartEvent,
@@ -16,7 +17,7 @@ from data_harness.streaming import (
 from data_harness.types import ToolUseBlock
 from fastapi.testclient import TestClient
 
-from main import app, _normalise_handle, _rate_limit_hits
+from main import SessionKeyChoice, app, _normalise_handle, _rate_limit_hits, resolve_session_key
 
 
 # ---------------------------------------------------------------------------
@@ -31,6 +32,7 @@ def _mock_agent_session(answer: str = "mocked answer") -> MagicMock:
     result.status = "success"
     result.text = answer
     result.error = None
+    result.usage = Usage(input_tokens=10, output_tokens=5)
     session.ask_result = AsyncMock(return_value=result)
 
     async def ask_stream(_content):
@@ -50,11 +52,17 @@ def _csv_bytes(content: str = "a,b\n1,2\n3,4\n") -> bytes:
 # Fixtures
 # ---------------------------------------------------------------------------
 
+def _fake_session_key() -> SessionKeyChoice:
+    return SessionKeyChoice(user_id=1, api_key=None, is_byok=False)
+
+
 @pytest.fixture
 def client():
     _rate_limit_hits.clear()
+    app.dependency_overrides[resolve_session_key] = _fake_session_key
     with TestClient(app) as c:
         yield c
+    app.dependency_overrides.pop(resolve_session_key, None)
 
 
 @pytest.fixture

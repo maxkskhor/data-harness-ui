@@ -13,22 +13,32 @@ from pathlib import Path
 from collections.abc import AsyncGenerator
 from typing import Any, Literal
 
+from contextlib import asynccontextmanager
+
 import pandas as pd
 from data_harness import AsyncAgent, AsyncAgentSession
+from data_harness.result import Usage
 from data_harness.streaming import (
     ContentBlockDeltaEvent,
     ContentBlockStartEvent,
     ContentBlockStopEvent,
     InputJSONDelta,
+    MessageDeltaEvent,
     TextDelta,
     ToolResultEvent,
 )
 from data_harness.types import ToolUseBlock
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy.orm import Session as DbSession
+from starlette.middleware.sessions import SessionMiddleware
+
+import auth
+import budget
+from db import get_db, init_db
 
 load_dotenv(Path(__file__).with_name(".env"))
 
@@ -64,12 +74,28 @@ class ChatResponse(BaseModel):
     session: SessionResponse
 
 
+class MeResponse(BaseModel):
+    login: str | None = None
+    avatar_url: str | None = None
+    budget_remaining_cents: float | None = None
+    budget_total_cents: float = budget.MONTHLY_BUDGET_CENTS
+
+
 @dataclass
 class SessionState:
     id: str
     agent_session: AsyncAgentSession
+    user_id: int | None = None
+    is_byok: bool = False
     messages: list[Message] = field(default_factory=list)
     uploads: list[UploadSummary] = field(default_factory=list)
+
+
+@dataclass
+class SessionKeyChoice:
+    user_id: int | None
+    api_key: str | None
+    is_byok: bool
 
 
 def _allowed_origins() -> list[str]:
@@ -82,7 +108,24 @@ def _allowed_origins() -> list[str]:
     return defaults + extra
 
 
-app = FastAPI(title="data-harness API")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    init_db()
+    yield
+
+
+app = FastAPI(title="data-harness API", lifespan=_lifespan)
+
+# Middleware order matters: the last one added is outermost. SessionMiddleware
+# goes first so CORSMiddleware wraps it and still attaches CORS headers to
+# auth errors. The session cookie is cross-site (Vercel <-> Render), hence
+# SameSite=None + Secure.
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.environ.get("SESSION_SECRET_KEY", "dev-insecure-secret-change-me"),
+    same_site=os.environ.get("SESSION_SAME_SITE", "none"),
+    https_only=os.environ.get("SESSION_HTTPS_ONLY", "true").lower() != "false",
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins(),
@@ -90,6 +133,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(auth.router)
 
 _sessions: dict[str, SessionState] = {}
 
@@ -122,13 +166,16 @@ def rate_limit(request: Request) -> None:
     hits.append(now)
 
 
-def _make_agent_session() -> AsyncAgentSession:
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key:
+def _make_agent_session(api_key: str | None = None) -> AsyncAgentSession:
+    """Build a session. `api_key` overrides the shared key (BYOK)."""
+    key = api_key or os.environ.get("DEEPSEEK_API_KEY")
+    if not key:
         raise HTTPException(status_code=503, detail="DEEPSEEK_API_KEY is not configured.")
     from data_harness.providers.openai import AsyncDeepSeekAdapter
 
-    adapter = AsyncDeepSeekAdapter(model=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"))
+    adapter = AsyncDeepSeekAdapter(
+        model=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"), api_key=key
+    )
     agent = AsyncAgent(
         adapter=adapter,
         system=(
@@ -141,16 +188,54 @@ def _make_agent_session() -> AsyncAgentSession:
     return agent.async_session()
 
 
+def resolve_session_key(
+    request: Request,
+    x_user_deepseek_key: str | None = Header(default=None, alias="X-User-Deepseek-Key"),
+    db: DbSession = Depends(get_db),
+) -> SessionKeyChoice:
+    """Decide which key a new session runs on: BYOK, or the shared key
+    against the caller's remaining monthly budget."""
+    if x_user_deepseek_key:
+        return SessionKeyChoice(
+            user_id=auth.current_user_id(request), api_key=x_user_deepseek_key, is_byok=True
+        )
+
+    user_id = auth.require_user_id(request)
+    if budget.remaining_budget_cents(db, user_id) <= 0:
+        raise HTTPException(
+            status_code=402,
+            detail="Monthly shared budget used up. Add your own DeepSeek key to keep going.",
+        )
+    return SessionKeyChoice(user_id=user_id, api_key=None, is_byok=False)
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/auth/me", response_model=MeResponse)
+def me(request: Request, db: DbSession = Depends(get_db)) -> MeResponse:
+    user_id = auth.current_user_id(request)
+    if user_id is None:
+        return MeResponse()
+    user = budget.get_user(db, user_id)
+    if user is None:
+        return MeResponse()
+    return MeResponse(
+        login=user.login,
+        avatar_url=user.avatar_url,
+        budget_remaining_cents=budget.remaining_budget_cents(db, user_id),
+    )
+
+
 @app.post("/sessions", response_model=SessionResponse, dependencies=[Depends(rate_limit)])
-def create_session() -> SessionResponse:
+def create_session(choice: SessionKeyChoice = Depends(resolve_session_key)) -> SessionResponse:
     session = SessionState(
         id=str(uuid.uuid4()),
-        agent_session=_make_agent_session(),
+        agent_session=_make_agent_session(api_key=choice.api_key),
+        user_id=choice.user_id,
+        is_byok=choice.is_byok,
     )
     _sessions[session.id] = session
     return _serialise_session(session)
@@ -212,7 +297,9 @@ async def upload_dataset(
     response_model=ChatResponse,
     dependencies=[Depends(rate_limit)],
 )
-async def send_message(session_id: str, request: ChatRequest) -> ChatResponse:
+async def send_message(
+    session_id: str, request: ChatRequest, db: DbSession = Depends(get_db)
+) -> ChatResponse:
     session = _get_session(session_id)
     content = request.content.strip()
     if not content:
@@ -226,6 +313,8 @@ async def send_message(session_id: str, request: ChatRequest) -> ChatResponse:
     session.messages.append(Message(role="user", content=content))
 
     result = await _maybe_await(session.agent_session.ask_result(content))
+    if not session.is_byok and session.user_id is not None:
+        budget.record_usage(db, session.user_id, result.usage)
     if result.status == "success":
         answer = result.text
     elif result.status == "max_turns_exceeded":
@@ -248,6 +337,7 @@ async def send_message(session_id: str, request: ChatRequest) -> ChatResponse:
 async def stream_message(
     session_id: str,
     request: ChatRequest,
+    db: DbSession = Depends(get_db),
 ) -> StreamingResponse:
     session = _get_session(session_id)
     content = request.content.strip()
@@ -265,8 +355,21 @@ async def stream_message(
         answer_parts: list[str] = []
         tool_json_by_index: dict[int, str] = {}
         tool_use_by_index: dict[int, ToolUseBlock] = {}
+        total_usage = Usage()
+
+        def record() -> None:
+            if not session.is_byok and session.user_id is not None:
+                budget.record_usage(db, session.user_id, total_usage)
+
         try:
             async for item in session.agent_session.ask_stream(content):
+                if isinstance(item, MessageDeltaEvent):
+                    total_usage = total_usage + Usage(
+                        input_tokens=item.input_tokens,
+                        output_tokens=item.output_tokens,
+                        cache_read_tokens=item.cache_read_tokens,
+                        cache_write_tokens=item.cache_write_tokens,
+                    )
                 normalised = _normalise_stream_item(
                     item,
                     tool_json_by_index=tool_json_by_index,
@@ -279,13 +382,21 @@ async def stream_message(
                     answer_parts.append(str(data))
                 yield _stream_event(event_type, data)
         except Exception as exc:
+            record()
             answer = f"Agent error: {exc!r}."
             session.messages.append(Message(role="assistant", content=answer))
             yield _stream_event("error", answer)
             yield _stream_event("done", _serialise_session(session).model_dump())
             return
 
+        record()
         answer = "".join(answer_parts)
+        if not answer.strip():
+            # The provider call can fail (bad key, rate limit) without the
+            # harness raising in streaming mode, leaving an empty response
+            # with no signal of what happened.
+            answer = "The agent returned no response. Check that the API key and model are valid."
+            yield _stream_event("error", answer)
         session.messages.append(Message(role="assistant", content=answer))
         yield _stream_event("done", _serialise_session(session).model_dump())
 

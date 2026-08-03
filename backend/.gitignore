@@ -14,3 +14,6 @@ wheels/
 
 # Local agent/provider run logs
 runs/
+
+# Local dev DB fallback (no DATABASE_URL set)
+local_dev.db
