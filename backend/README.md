@@ -43,6 +43,12 @@ SESSION_HTTPS_ONLY=false
 
 # optional: shared-key monthly budget in cents (default 50 = $0.50)
 MONTHLY_BUDGET_CENTS=50
+
+# optional: DeepSeek pricing overrides (USD cents per million tokens),
+# in case rates change before the code does. See pricing.py for defaults.
+DEEPSEEK_INPUT_CENTS_PER_MILLION=14
+DEEPSEEK_OUTPUT_CENTS_PER_MILLION=28
+DEEPSEEK_CACHE_READ_CENTS_PER_MILLION=0.3
 ```
 
 Then run:
@@ -79,8 +85,16 @@ The streaming endpoint emits newline-delimited JSON events:
 {"type":"tool_use","data":{"name":"python_interpreter","input":{"code":"df.head()"}}}
 {"type":"tool_result","data":{"content":"shape: (5, 8)","is_error":false}}
 {"type":"chunk","data":"The answer is "}
+{"type":"chart","data":{"base64":"...","format":"png","title":"y = x^2"}}
 {"type":"done","data":{"id":"...","messages":[...]}}
 ```
+
+Chart events come from diffing `SessionCache.list_charts()` before/after the
+turn (`data-harness`'s streaming API has no chart event of its own — only its
+non-streaming `RunResult.charts`). Every cost-generating endpoint also sits
+behind a per-IP rate limit (20 requests / 10 min, `rate_limit` in `main.py`)
+and input size caps (`MAX_MESSAGE_LENGTH`, `MAX_UPLOAD_BYTES`) — a floor
+under the budget system above, not a replacement for it.
 
 ## Tests
 

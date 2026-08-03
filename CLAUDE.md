@@ -1,5 +1,9 @@
 # Development guide
 
+Full architecture, deployment, security posture, and operational procedures
+live in [`README.md`](README.md) — read that first for anything beyond local
+dev. This file is the terse agent-facing quick-reference.
+
 ## Project layout
 
 ```text
@@ -70,10 +74,25 @@ cd backend
 uv run python -m pytest tests/ -v
 ```
 
+## Deployment
+
+Push to `main` auto-deploys the **backend** (Render, webhook-connected).
+It does **not** auto-deploy the **frontend** — Vercel isn't
+git-connected here, so ship frontend changes with `vercel --prod --yes`
+from `frontend/` after pushing. CI (`.github/workflows/ci.yml`) runs on
+every push/PR but doesn't gate either deploy — treat a red run as
+something to go investigate, not something that already stopped anything.
+
 ## Key conventions
 
 - `DEEPSEEK_API_KEY` is required. The backend returns `503` without it — no
   silent fallback.
+- Using the app at all requires GitHub sign-in or a BYOK key
+  (`X-User-Deepseek-Key` header) — see README's "How auth, budget, and BYOK
+  fit together". Don't add a code path that calls the shared key without
+  going through `resolve_session_key`'s budget check.
+- Every cost-generating endpoint carries `dependencies=[Depends(rate_limit)]`.
+  Add it to new ones too.
 - CSV is the first data-source path; the app is not CSV-specific.
 - The frontend uses Next.js App Router with `"use client"` for interactive
   components.
