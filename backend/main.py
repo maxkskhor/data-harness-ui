@@ -69,10 +69,20 @@ class SessionState:
     uploads: list[UploadSummary] = field(default_factory=list)
 
 
+def _allowed_origins() -> list[str]:
+    defaults = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    extra = [
+        origin.strip()
+        for origin in os.environ.get("ALLOWED_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+    return defaults + extra
+
+
 app = FastAPI(title="data-harness API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
