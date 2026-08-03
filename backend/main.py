@@ -97,7 +97,7 @@ def _make_agent_session() -> AsyncAgentSession:
         raise HTTPException(status_code=503, detail="DEEPSEEK_API_KEY is not configured.")
     from data_harness.providers.openai import AsyncDeepSeekAdapter
 
-    adapter = AsyncDeepSeekAdapter(model=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"))
+    adapter = AsyncDeepSeekAdapter(model=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"))
     agent = AsyncAgent(
         adapter=adapter,
         system=(

@@ -18,7 +18,7 @@ Create `.env` in this directory:
 ```env
 DEEPSEEK_API_KEY=...
 # optional
-DEEPSEEK_MODEL=deepseek-chat
+DEEPSEEK_MODEL=deepseek-v4-flash
 ```
 
 Then run:
