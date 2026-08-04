@@ -18,9 +18,9 @@ from typing import Any, Literal
 from contextlib import asynccontextmanager
 
 import pandas as pd
-from data_harness import AsyncAgent, AsyncAgentSession
-from data_harness.result import Usage
-from data_harness.streaming import (
+from data_harness import (
+    AsyncAgent,
+    AsyncAgentSession,
     ContentBlockDeltaEvent,
     ContentBlockStartEvent,
     ContentBlockStopEvent,
@@ -28,8 +28,10 @@ from data_harness.streaming import (
     MessageDeltaEvent,
     TextDelta,
     ToolResultEvent,
+    ToolUseBlock,
+    Usage,
+    resolve_async_adapter,
 )
-from data_harness.types import ToolUseBlock
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -192,10 +194,9 @@ def _make_agent_session(api_key: str | None = None) -> AsyncAgentSession:
     key = api_key or os.environ.get("DEEPSEEK_API_KEY")
     if not key:
         raise HTTPException(status_code=503, detail="DEEPSEEK_API_KEY is not configured.")
-    from data_harness.providers.openai import AsyncDeepSeekAdapter
 
-    adapter = AsyncDeepSeekAdapter(
-        model=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"), api_key=key
+    adapter = resolve_async_adapter(
+        os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"), api_key=key
     )
     agent = AsyncAgent(
         adapter=adapter,

@@ -5,16 +5,16 @@ import io
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from data_harness.result import Usage
-from data_harness.streaming import (
+from data_harness import (
     ContentBlockDeltaEvent,
     ContentBlockStartEvent,
     ContentBlockStopEvent,
     InputJSONDelta,
     TextDelta,
     ToolResultEvent,
+    ToolUseBlock,
+    Usage,
 )
-from data_harness.types import ToolUseBlock
 from fastapi.testclient import TestClient
 
 from main import SessionKeyChoice, app, _normalise_handle, _rate_limit_hits, resolve_session_key

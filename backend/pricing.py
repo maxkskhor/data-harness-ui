@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 
-from data_harness.result import Usage
+from data_harness import Usage
 
 DEFAULT_INPUT_CENTS_PER_MILLION = 14.0
 DEFAULT_OUTPUT_CENTS_PER_MILLION = 28.0

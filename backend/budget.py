@@ -8,7 +8,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 
-from data_harness.result import Usage
+from data_harness import Usage
 from sqlalchemy.orm import Session
 
 from db import MonthlyUsage, User
