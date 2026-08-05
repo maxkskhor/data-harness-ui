@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from data_harness import (
+    ChartArtifact,
     ContentBlockDeltaEvent,
     ContentBlockStartEvent,
     ContentBlockStopEvent,
@@ -48,13 +49,28 @@ def _csv_bytes(content: str = "a,b\n1,2\n3,4\n") -> bytes:
     return content.encode()
 
 
-def _mock_chart(path: str = "/tmp/chart.png", data: bytes = b"fake-png-bytes") -> MagicMock:
-    chart = MagicMock()
-    chart.path = path
-    chart.format = "png"
-    chart.title = "Revenue by Month"
-    chart.read_bytes = MagicMock(return_value=data)
+def _mock_chart(
+    handle: str = "chart",
+    path: str = "/tmp/chart.png",
+    data: bytes = b"fake-png-bytes",
+    title: str = "Revenue by Month",
+) -> ChartArtifact:
+    # A real ChartArtifact, not a bare MagicMock — the /charts/{handle}
+    # endpoint does `isinstance(value, ChartArtifact)`, which a plain mock
+    # would fail.
+    chart = ChartArtifact(path=path, format="png", title=title, handle=handle)
+    chart.read_bytes = MagicMock(return_value=data)  # type: ignore[method-assign]
     return chart
+
+
+def _wire_charts(mock_session: MagicMock, charts: list[ChartArtifact]) -> None:
+    """Wire a mock AsyncAgentSession's cache to serve `charts` consistently
+    across list_charts()/has_handle()/get() — everything the endpoint and
+    the inline ![title](handle) resolver touch."""
+    by_handle = {c.handle: c for c in charts}
+    mock_session.cache.list_charts = MagicMock(return_value=charts)
+    mock_session.cache.has_handle = MagicMock(side_effect=lambda h: h in by_handle)
+    mock_session.cache.get = MagicMock(side_effect=lambda h: by_handle[h])
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +260,8 @@ def test_stream_message_forwards_tool_events(client):
     assert '"type": "tool_result"' in events[1]
     assert "shape: (2, 2)" in events[1]
     assert '"type": "chunk"' in events[2]
-    assert '"type": "done"' in events[3]
+    assert '"type": "answer"' in events[3]
+    assert '"type": "done"' in events[4]
     history = client.get(f"/sessions/{sid}").json()["messages"]
     assert history[-1]["role"] == "assistant"
     assert history[-1]["content"] == "# Result\nThe table has **2 rows**."
@@ -295,7 +312,8 @@ def test_stream_message_maps_data_harness_stream_events(client):
     assert '"# Summary\\n"' in events[2]
     assert '"type": "chunk"' in events[3]
     assert '"- Done"' in events[3]
-    assert '"type": "done"' in events[4]
+    assert '"type": "answer"' in events[4]
+    assert '"type": "done"' in events[5]
     history = client.get(f"/sessions/{sid}").json()["messages"]
     assert history[-1]["role"] == "assistant"
     assert history[-1]["content"] == "# Summary\n- Done"
@@ -331,7 +349,7 @@ def test_stream_message_emits_chart_event_with_url_not_bytes(client):
     chart = _mock_chart()
 
     async def ask_stream(_content):
-        mock_session.cache.list_charts = MagicMock(return_value=[chart])
+        _wire_charts(mock_session, [chart])
         yield "Here's the chart."
 
     mock_session.ask_stream = ask_stream
@@ -345,13 +363,13 @@ def test_stream_message_emits_chart_event_with_url_not_bytes(client):
     events = [line for line in resp.text.splitlines() if line]
     chart_events = [e for e in events if '"type": "chart"' in e]
     assert len(chart_events) == 1
-    assert f"/sessions/{sid}/charts/0" in chart_events[0]
+    assert f"/sessions/{sid}/charts/chart" in chart_events[0]
     # The raw bytes must never appear in the stream itself.
     assert "fake-png-bytes" not in resp.text
 
     history = client.get(f"/sessions/{sid}").json()["messages"]
     chart_message = history[-1]
-    assert chart_message["image_url"] == f"/sessions/{sid}/charts/0"
+    assert chart_message["image_url"] == f"/sessions/{sid}/charts/chart"
     assert chart_message["image_title"] == "Revenue by Month"
     assert chart_message.get("image_base64") is None
 
@@ -369,7 +387,7 @@ def test_send_message_includes_chart_when_produced(client):
     original_result = mock_session.ask_result.return_value
 
     async def ask_result(_content):
-        mock_session.cache.list_charts = MagicMock(return_value=[chart])
+        _wire_charts(mock_session, [chart])
         return original_result
 
     mock_session.ask_result = ask_result
@@ -378,19 +396,19 @@ def test_send_message_includes_chart_when_produced(client):
     assert resp.status_code == 200
     history = resp.json()["session"]["messages"]
     chart_message = history[-1]
-    assert chart_message["image_url"] == f"/sessions/{sid}/charts/0"
+    assert chart_message["image_url"] == f"/sessions/{sid}/charts/chart"
     assert chart_message["image_format"] == "png"
 
 
 def test_get_chart_serves_bytes(client):
     mock_session = _mock_agent_session()
     chart = _mock_chart(data=b"\x89PNG-fake-bytes")
-    mock_session.cache.list_charts = MagicMock(return_value=[chart])
+    _wire_charts(mock_session, [chart])
     with patch("main._make_agent_session", return_value=mock_session):
         resp = client.post("/sessions")
         sid = resp.json()["id"]
 
-    resp = client.get(f"/sessions/{sid}/charts/0")
+    resp = client.get(f"/sessions/{sid}/charts/chart")
 
     assert resp.status_code == 200
     assert resp.content == b"\x89PNG-fake-bytes"
@@ -398,15 +416,75 @@ def test_get_chart_serves_bytes(client):
     assert "immutable" in resp.headers["cache-control"]
 
 
-def test_get_chart_out_of_range_returns_404(client, session_id):
-    resp = client.get(f"/sessions/{session_id}/charts/0")
+def test_get_chart_unknown_handle_returns_404(client, session_id):
+    resp = client.get(f"/sessions/{session_id}/charts/nope")
     assert resp.status_code == 404
 
 
-def test_get_chart_requires_session_ownership(client, session_id):
+def test_get_chart_requires_session_ownership(client):
+    mock_session = _mock_agent_session()
+    _wire_charts(mock_session, [_mock_chart()])
+    with patch("main._make_agent_session", return_value=mock_session):
+        resp = client.post("/sessions")
+        sid = resp.json()["id"]
+
     with patch("main.auth.current_user_id", return_value=2):
-        resp = client.get(f"/sessions/{session_id}/charts/0")
+        resp = client.get(f"/sessions/{sid}/charts/chart")
     assert resp.status_code == 404
+
+
+def test_inline_chart_reference_resolves_to_real_url_and_skips_duplicate_bubble(client):
+    # The model referencing ![title](chart) inline in its own prose is the
+    # whole point of this feature — the text must come back with a real URL
+    # in place of the bare handle, and the chart must NOT also appear as a
+    # second, separate trailing message (that's the pre-existing fallback
+    # path for when the model doesn't reference it inline).
+    mock_session = _mock_agent_session(
+        answer="Here you go:\n\n![Revenue](chart)\n\nMay was the best month."
+    )
+    chart = _mock_chart()
+    with patch("main._make_agent_session", return_value=mock_session):
+        resp = client.post("/sessions")
+        sid = resp.json()["id"]
+
+    original_result = mock_session.ask_result.return_value
+
+    async def ask_result(_content):
+        _wire_charts(mock_session, [chart])
+        return original_result
+
+    mock_session.ask_result = ask_result
+    resp = client.post(f"/sessions/{sid}/messages", json={"content": "plot it"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert f"![Revenue](/sessions/{sid}/charts/chart)" in body["message"]["content"]
+
+    # The chart is embedded inline in the text's own content above; it must
+    # NOT also appear as a separate trailing image_url message (that's the
+    # fallback path for when the model doesn't reference it inline).
+    history = body["session"]["messages"]
+    image_messages = [m for m in history if m.get("image_url")]
+    assert image_messages == []
+
+
+def test_unresolvable_inline_chart_reference_is_stripped(client):
+    # A hallucinated or stale handle name must not survive into the response
+    # as a markdown image pointing nowhere real (a permanently-broken <img>
+    # is worse than no reference at all).
+    mock_session = _mock_agent_session(
+        answer="Here's the trend: ![Revenue](not_a_real_handle) as shown."
+    )
+    with patch("main._make_agent_session", return_value=mock_session):
+        resp = client.post("/sessions")
+        sid = resp.json()["id"]
+
+    resp = client.post(f"/sessions/{sid}/messages", json={"content": "plot it"})
+
+    assert resp.status_code == 200
+    content = resp.json()["message"]["content"]
+    assert "not_a_real_handle" not in content
+    assert "![" not in content
 
 
 def test_send_empty_message_rejected(client, session_id):

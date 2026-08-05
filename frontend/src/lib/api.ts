@@ -106,6 +106,7 @@ type StreamEvent =
   | { type: "tool_use"; data: ToolUseEvent }
   | { type: "tool_result"; data: ToolResultEvent }
   | { type: "chart"; data: ChartEvent }
+  | { type: "answer"; data: string }
   | { type: "error"; data: string }
   | { type: "done"; data: Session };
 

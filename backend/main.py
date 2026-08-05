@@ -20,6 +20,7 @@ import pandas as pd
 from data_harness import (
     AsyncAgent,
     AsyncAgentSession,
+    ChartArtifact,
     ContentBlockDeltaEvent,
     ContentBlockStartEvent,
     ContentBlockStopEvent,
@@ -205,10 +206,13 @@ def _make_agent_session(api_key: str | None = None) -> AsyncAgentSession:
             "evidence-backed answers. Answer in concise, readable Markdown. "
             "matplotlib is available for charts: build a normal matplotlib "
             "figure (e.g. plt.plot/plt.bar + plt.title) and it is captured "
-            "and shown to the user automatically right below your answer — "
-            "no need to save it yourself. Never add markdown image syntax "
-            "like ![title](handle) to reference it; the UI renders the "
-            "chart on its own, and that syntax won't resolve to anything."
+            "and shown to the user automatically — no need to save it "
+            "yourself. If it belongs at a specific point in your answer "
+            "(e.g. right after you introduce it), reference it inline with "
+            "markdown image syntax using the exact handle it was saved to, "
+            "e.g. ![Revenue by month](chart) — the UI resolves this to the "
+            "real image. If you don't reference it, it still appears "
+            "automatically after your answer."
         ),
         max_turns=10,
     )
@@ -277,25 +281,29 @@ def get_session(session_id: str, request: Request) -> SessionResponse:
     return _serialise_session(_get_session(session_id, request))
 
 
-@app.get("/sessions/{session_id}/charts/{index}")
-def get_chart(session_id: str, index: int, request: Request) -> Response:
-    # Charts are served by index into list_charts() rather than embedded as
-    # base64 in the message history — the session's SessionCache never
-    # evicts (no hot_limit set in _make_agent_session), so an index stays
-    # stable for the process lifetime and each chart's bytes are read from
-    # disk exactly once, on demand, instead of on every session fetch.
+@app.get("/sessions/{session_id}/charts/{handle}")
+def get_chart(session_id: str, handle: str, request: Request) -> Response:
+    # Charts are served by cache handle rather than embedded as base64 in
+    # the message history — the handle is also what the model itself uses
+    # to reference a chart inline (![title](handle) in its answer), so this
+    # doubles as the resolution target for that. The session's SessionCache
+    # never evicts (no hot_limit set in _make_agent_session), so a handle
+    # stays valid for the process lifetime and bytes are read from disk
+    # exactly once, on demand, instead of on every session fetch.
     session = _get_session(session_id, request)
-    charts = session.agent_session.cache.list_charts()
-    if index < 0 or index >= len(charts):
+    cache = session.agent_session.cache
+    if not cache.has_handle(handle):
         raise HTTPException(status_code=404, detail="Chart not found.")
-    chart = charts[index]
+    value = cache.get(handle)
+    if not isinstance(value, ChartArtifact):
+        raise HTTPException(status_code=404, detail="Chart not found.")
     try:
-        data = chart.read_bytes()
+        data = value.read_bytes()
     except OSError as exc:
         raise HTTPException(status_code=404, detail="Chart no longer available.") from exc
     return Response(
         content=data,
-        media_type=f"image/{chart.format}",
+        media_type=f"image/{value.format}",
         headers={"Cache-Control": "private, max-age=31536000, immutable"},
     )
 
@@ -384,9 +392,14 @@ async def send_message(
     else:
         answer = f"Agent error: {result.error or 'unknown'}."
 
+    answer, inline_chart_handles = _resolve_chart_references(session, answer)
     assistant_message = Message(role="assistant", content=answer)
     session.messages.append(assistant_message)
-    session.messages.extend(_new_chart_messages(session, chart_paths_before))
+    session.messages.extend(
+        _new_chart_messages(
+            session, chart_paths_before, skip_handles=frozenset(inline_chart_handles)
+        )
+    )
     return ChatResponse(
         message=assistant_message,
         session=_serialise_session(session),
@@ -470,15 +483,30 @@ async def stream_message(
 
         record()
         answer = "".join(answer_parts)
-        if not answer.strip():
+        had_real_answer = bool(answer.strip())
+        if not had_real_answer:
             # The provider call can fail (bad key, rate limit) without the
             # harness raising in streaming mode, leaving an empty response
             # with no signal of what happened.
             answer = "The agent returned no response. Check that the API key and model are valid."
             yield _stream_event("error", answer)
-        session.messages.append(Message(role="assistant", content=answer))
 
-        for chart_message in _new_chart_messages(session, chart_paths_before):
+        answer, inline_chart_handles = _resolve_chart_references(session, answer)
+        session.messages.append(Message(role="assistant", content=answer))
+        if had_real_answer:
+            # The client built its live view by appending raw "chunk" text
+            # as it streamed, before any chart handle could be resolved to a
+            # real URL — send the corrected text once so the client can
+            # replace what it displayed with the resolved version, without
+            # touching the tool_use/tool_result trace bubbles shown live
+            # (those aren't part of `session.messages` at all, which is why
+            # the client doesn't just adopt the `done` event's message list
+            # wholesale).
+            yield _stream_event("answer", answer)
+
+        for chart_message in _new_chart_messages(
+            session, chart_paths_before, skip_handles=frozenset(inline_chart_handles)
+        ):
             session.messages.append(chart_message)
             yield _stream_event(
                 "chart",
@@ -494,20 +522,56 @@ async def stream_message(
     return StreamingResponse(events(), media_type="application/x-ndjson")
 
 
+_CHART_MARKDOWN_IMAGE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+
+
+def _resolve_chart_references(
+    session: SessionState, text: str
+) -> tuple[str, set[str]]:
+    """Rewrite `![title](handle)` to a real chart URL when `handle` names an
+    actual chart; strip it if not (a hallucinated or stale handle would
+    otherwise render as a broken image).
+
+    Returns the rewritten text and the set of handles it resolved, so the
+    caller can skip a duplicate trailing chart message for anything already
+    shown inline.
+    """
+    known = {
+        chart.handle
+        for chart in session.agent_session.cache.list_charts()
+        if chart.handle
+    }
+    resolved: set[str] = set()
+
+    def _replace(match: re.Match[str]) -> str:
+        handle = match.group(2).strip()
+        if handle not in known:
+            return ""
+        resolved.add(handle)
+        return f"![{match.group(1)}](/sessions/{session.id}/charts/{handle})"
+
+    return _CHART_MARKDOWN_IMAGE.sub(_replace, text), resolved
+
+
 def _new_chart_messages(
-    session: SessionState, paths_before: set[str]
+    session: SessionState,
+    paths_before: set[str],
+    *,
+    skip_handles: frozenset[str] = frozenset(),
 ) -> list[Message]:
-    """Build `Message`s for charts drawn since `paths_before` was captured."""
+    """Build `Message`s for charts drawn since `paths_before` was captured,
+    excluding any already referenced inline via `_resolve_chart_references`.
+    """
     charts = session.agent_session.cache.list_charts()
     messages = []
-    for index, chart in enumerate(charts):
-        if chart.path in paths_before:
+    for chart in charts:
+        if chart.path in paths_before or chart.handle in skip_handles:
             continue
         messages.append(
             Message(
                 role="assistant",
                 content="",
-                image_url=f"/sessions/{session.id}/charts/{index}",
+                image_url=f"/sessions/{session.id}/charts/{chart.handle}",
                 image_format=chart.format,
                 image_title=chart.title,
             )

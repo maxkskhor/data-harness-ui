@@ -231,6 +231,8 @@ export default function WorkbenchPage() {
             appendToolMessage(session.id, toolResultMessage(chunk.data));
           } else if (chunk.type === "chart") {
             appendToolMessage(session.id, chartMessage(chunk.data));
+          } else if (chunk.type === "answer") {
+            setFinalAssistantText(session.id, chunk.data);
           } else {
             setError(chunk.data);
           }
@@ -287,6 +289,25 @@ export default function WorkbenchPage() {
         ...last,
         content: `${last.content}${chunk}`,
       };
+      return { ...current, messages };
+    });
+  }
+
+  // The client built its live text by appending raw "chunk" deltas as they
+  // streamed in, before the server could resolve any ![title](handle) chart
+  // reference to a real URL — this replaces that text with the corrected
+  // final version once the stream completes.
+  function setFinalAssistantText(sessionId: string, text: string) {
+    setSession((current) => {
+      if (!current || current.id !== sessionId) {
+        return current;
+      }
+      const messages = [...current.messages];
+      const last = messages.at(-1);
+      if (last?.role !== "assistant") {
+        return current;
+      }
+      messages[messages.length - 1] = { ...last, content: text };
       return { ...current, messages };
     });
   }
@@ -569,6 +590,23 @@ function MessageBubble({ message }: { message: ChatMessage }) {
 }
 
 function ChartImage({ message }: { message: ChatMessage }) {
+  if (!message.image_url) {
+    return null;
+  }
+  return (
+    <ChartCard
+      src={apiUrl(message.image_url)}
+      title={message.image_title ?? undefined}
+    />
+  );
+}
+
+// Shared by the trailing chart message bubble (ChartImage, above) and any
+// ![title](handle) the model references inline in its own answer text
+// (resolved server-side to a real chart URL — see MarkdownContent's "image"
+// block below) so both look identical regardless of how the chart reached
+// the page.
+function ChartCard({ src, title }: { src: string; title?: string }) {
   const [loaded, setLoaded] = useState(false);
   const imgRef = useRef<HTMLImageElement | null>(null);
 
@@ -582,10 +620,6 @@ function ChartImage({ message }: { message: ChatMessage }) {
     }
   }, []);
 
-  if (!message.image_url) {
-    return null;
-  }
-  const src = apiUrl(message.image_url);
   return (
     <figure className="space-y-1.5">
       <a
@@ -604,7 +638,7 @@ function ChartImage({ message }: { message: ChatMessage }) {
           <img
             ref={imgRef}
             src={src}
-            alt={message.image_title ?? "Chart"}
+            alt={title ?? "Chart"}
             width={560}
             height={350}
             onLoad={() => setLoaded(true)}
@@ -618,7 +652,7 @@ function ChartImage({ message }: { message: ChatMessage }) {
         </div>
       </a>
       <div className="flex items-center justify-between text-xs text-muted">
-        <span>{message.image_title ?? "Chart"}</span>
+        <span>{title ?? "Chart"}</span>
         <a
           href={src}
           download
@@ -691,6 +725,11 @@ function MarkdownContent({ content }: { content: string }) {
             </ul>
           );
         }
+        if (block.type === "image") {
+          return (
+            <ChartCard key={index} src={apiUrl(block.src)} title={block.alt || undefined} />
+          );
+        }
         if (block.type === "table") {
           return (
             <div
@@ -741,7 +780,10 @@ type MarkdownBlock =
   | { type: "heading"; content: string }
   | { type: "list"; items: string[] }
   | { type: "table"; header: string[]; rows: string[][] }
+  | { type: "image"; alt: string; src: string }
   | { type: "paragraph"; content: string };
+
+const STANDALONE_IMAGE_LINE = /^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$/;
 
 const TABLE_SEPARATOR_ROW = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
 
@@ -797,6 +839,17 @@ function splitMarkdownBlocks(content: string): MarkdownBlock[] {
       continue;
     }
 
+    // A chart reference on its own line: ![title](url). The backend only
+    // ever emits a resolved, absolute-path url here (an unresolvable handle
+    // is stripped server-side), so this always renders as a real chart.
+    const standaloneImage = line.match(STANDALONE_IMAGE_LINE);
+    if (standaloneImage) {
+      flushParagraph();
+      flushList();
+      blocks.push({ type: "image", alt: standaloneImage[1], src: standaloneImage[2] });
+      continue;
+    }
+
     // A GFM pipe table: a `| ... |` row followed by a `|---|---|`-style
     // separator row. Consume rows until a blank line or a line that isn't
     // itself a pipe row.
@@ -846,9 +899,15 @@ function splitMarkdownBlocks(content: string): MarkdownBlock[] {
   return blocks;
 }
 
+const INLINE_IMAGE = /^!\[([^\]]*)\]\(([^)]+)\)$/;
+
 function renderInlineMarkdown(content: string): ReactNode[] {
   const nodes: ReactNode[] = [];
-  const pattern = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+  // A standalone image line is handled as its own block (full ChartCard
+  // treatment, see splitMarkdownBlocks) — this inline case only covers the
+  // rarer case of a chart reference sitting mid-sentence, where it gets a
+  // plain inline image instead (a <div>-based card isn't valid inside <p>).
+  const pattern = /(\*\*[^*]+\*\*|`[^`]+`|!\[[^\]]*\]\([^)]+\))/g;
   let lastIndex = 0;
 
   for (const match of content.matchAll(pattern)) {
@@ -856,11 +915,22 @@ function renderInlineMarkdown(content: string): ReactNode[] {
       nodes.push(content.slice(lastIndex, match.index));
     }
     const token = match[0];
+    const image = token.match(INLINE_IMAGE);
     if (token.startsWith("**")) {
       nodes.push(
         <strong key={nodes.length} className="font-semibold text-foreground">
           {token.slice(2, -2)}
         </strong>,
+      );
+    } else if (image) {
+      // eslint-disable-next-line @next/next/no-img-element -- backend-served
+      nodes.push(
+        <img
+          key={nodes.length}
+          src={apiUrl(image[2])}
+          alt={image[1] || "Chart"}
+          className="inline-block max-h-48 max-w-full rounded border border-border bg-white p-1 align-middle"
+        />,
       );
     } else {
       nodes.push(

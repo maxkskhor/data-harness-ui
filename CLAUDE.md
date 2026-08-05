@@ -57,7 +57,7 @@ GET  /auth/github/callback
 POST /auth/logout
 POST /sessions
 GET  /sessions/{session_id}
-GET  /sessions/{session_id}/charts/{index}
+GET  /sessions/{session_id}/charts/{handle}
 POST /sessions/{session_id}/uploads
 POST /sessions/{session_id}/messages
 POST /sessions/{session_id}/messages/stream

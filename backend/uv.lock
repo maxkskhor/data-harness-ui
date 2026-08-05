@@ -87,7 +87,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "data-harness", extras = ["openai"], specifier = ">=1.3.1,<2.0" },
+    { name = "data-harness", extras = ["openai"], specifier = ">=1.3.2,<2.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "itsdangerous", specifier = ">=2.2.0" },
@@ -230,7 +230,7 @@ wheels = [
 
 [[package]]
 name = "data-harness"
-version = "1.3.1"
+version = "1.3.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -238,9 +238,9 @@ dependencies = [
     { name = "numpy" },
     { name = "pandas" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/eb/38/758e279829d7ba2f8b370e3b0894bb8b24e9c47167bac601285d73ce2e9f/data_harness-1.3.1.tar.gz", hash = "sha256:26bab90fa96d832eb57eddd4d81e9e491c302754df68c2fdb9d2bbda25138f27", size = 3239569, upload-time = "2026-08-04T22:24:18.981Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/40/f0/403ce05c23f5080fb746c39047e0ecd17673b9682957efc36a1272eccbcc/data_harness-1.3.2.tar.gz", hash = "sha256:2d77ff51657472d70a9d94251d4421066a57c24fe96bc38c7cb171bce01719ed", size = 3240581, upload-time = "2026-08-05T12:44:01.598Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/34/63/c7a70aad485701bb66055a128b9c3abf6882bd4f9bd3775a527ad3b758a7/data_harness-1.3.1-py3-none-any.whl", hash = "sha256:7d7453243898947dfe6cff1dd148713b61b8170695b0853ccb51de61b6e8956f", size = 128070, upload-time = "2026-08-04T22:24:17.409Z" },
+    { url = "https://files.pythonhosted.org/packages/9b/eb/20f2930f18aa718d6cdb24e670732b5cf5c0718267cf7ab6559272557aaa/data_harness-1.3.2-py3-none-any.whl", hash = "sha256:bec6ec23d3f304ca4402657e52d56033da47b688f99813f1aff8454e15a388ed", size = 128317, upload-time = "2026-08-05T12:44:00.476Z" },
 ]
 
 [package.optional-dependencies]

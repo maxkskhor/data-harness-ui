@@ -238,7 +238,8 @@ Newline-delimited JSON events:
 {"type":"tool_use","data":{"name":"python_interpreter","input":{"code":"df.head()"}}}
 {"type":"tool_result","data":{"content":"shape: (5, 8)","is_error":false}}
 {"type":"chunk","data":"# Summary\n"}
-{"type":"chart","data":{"url":"/sessions/{id}/charts/0","format":"png","title":"y = x^2"}}
+{"type":"answer","data":"# Summary\n\n![Revenue by month](/sessions/{id}/charts/chart)\n\n..."}
+{"type":"chart","data":{"url":"/sessions/{id}/charts/chart_2","format":"png","title":"y = x^2"}}
 {"type":"done","data":{"id":"...","messages":[...]}}
 ```
 
@@ -248,16 +249,29 @@ aren't part of `data-harness`'s own stream API (only its non-streaming
 `RunResult.charts`); the backend diffs `SessionCache.list_charts()` before
 and after each turn and treats any new ones as new messages.
 
-Charts are served by index from `GET /sessions/{session_id}/charts/{index}`
+Charts are served by cache handle from `GET /sessions/{session_id}/charts/{handle}`
 rather than embedded as base64 — a `Message.image_url` (and the `chart`
-event's `url`) is just a path into that endpoint. Earlier versions embedded
-full base64 PNGs in every message and re-sent them on every session fetch;
-for a chart-heavy conversation that made every subsequent turn's response
-(and every `GET /sessions/{id}`) grow with the *total* image bytes generated
-so far, not just the new ones — a 2-chart session's per-turn payload roughly
-doubled from ~63KB to ~127KB, confirmed by measuring actual responses. The
-index is stable because `_make_agent_session` builds the cache with no
-`hot_limit`, so it never evicts entries for the life of the process.
+event's `url`) is just a path into that endpoint, and `handle` is stable for
+the life of the process because `_make_agent_session` builds the cache with
+no `hot_limit`, so it never evicts. Earlier versions embedded full base64
+PNGs in every message and re-sent them on every session fetch; for a
+chart-heavy conversation that made every subsequent turn's response (and
+every `GET /sessions/{id}`) grow with the *total* image bytes generated so
+far, not just the new ones — a 2-chart session's per-turn payload roughly
+doubled from ~63KB to ~127KB, confirmed by measuring actual responses.
+
+Handle-based addressing also lets the model reference a chart from inside
+its own answer, `![title](handle)`, exactly the handle name it got back
+from the `python_interpreter` tool result. The backend rewrites any such
+reference in `answer` to a real chart URL before storing/returning it (and
+strips it if the handle doesn't resolve to an actual chart — a hallucinated
+or stale handle shouldn't render as a permanently-broken image), then skips
+the usual trailing chart message for anything already shown inline. Because
+the streaming client builds its live view by appending raw `chunk` text as
+it arrives — before the backend can resolve anything — the `answer` event
+carries the corrected final text once the stream completes, and the client
+replaces what it displayed with it (without touching the tool-call trace
+bubbles shown live, which aren't part of `session.messages` at all).
 
 ## Project shape
 
