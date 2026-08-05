@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import io
 import os
 import re
@@ -35,7 +34,7 @@ from data_harness import (
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session as DbSession
 from starlette.middleware.sessions import SessionMiddleware
@@ -53,7 +52,7 @@ MessageRole = Literal["user", "assistant"]
 class Message(BaseModel):
     role: MessageRole
     content: str
-    image_base64: str | None = None
+    image_url: str | None = None
     image_format: str | None = None
     image_title: str | None = None
 
@@ -206,8 +205,10 @@ def _make_agent_session(api_key: str | None = None) -> AsyncAgentSession:
             "evidence-backed answers. Answer in concise, readable Markdown. "
             "matplotlib is available for charts: build a normal matplotlib "
             "figure (e.g. plt.plot/plt.bar + plt.title) and it is captured "
-            "and shown to the user automatically — no need to save it "
-            "yourself or fall back to text-rendered charts."
+            "and shown to the user automatically right below your answer — "
+            "no need to save it yourself. Never add markdown image syntax "
+            "like ![title](handle) to reference it; the UI renders the "
+            "chart on its own, and that syntax won't resolve to anything."
         ),
         max_turns=10,
     )
@@ -274,6 +275,29 @@ def create_session(choice: SessionKeyChoice = Depends(resolve_session_key)) -> S
 )
 def get_session(session_id: str, request: Request) -> SessionResponse:
     return _serialise_session(_get_session(session_id, request))
+
+
+@app.get("/sessions/{session_id}/charts/{index}")
+def get_chart(session_id: str, index: int, request: Request) -> Response:
+    # Charts are served by index into list_charts() rather than embedded as
+    # base64 in the message history — the session's SessionCache never
+    # evicts (no hot_limit set in _make_agent_session), so an index stays
+    # stable for the process lifetime and each chart's bytes are read from
+    # disk exactly once, on demand, instead of on every session fetch.
+    session = _get_session(session_id, request)
+    charts = session.agent_session.cache.list_charts()
+    if index < 0 or index >= len(charts):
+        raise HTTPException(status_code=404, detail="Chart not found.")
+    chart = charts[index]
+    try:
+        data = chart.read_bytes()
+    except OSError as exc:
+        raise HTTPException(status_code=404, detail="Chart no longer available.") from exc
+    return Response(
+        content=data,
+        media_type=f"image/{chart.format}",
+        headers={"Cache-Control": "private, max-age=31536000, immutable"},
+    )
 
 
 @app.post(
@@ -348,6 +372,7 @@ async def send_message(
             )
 
     session.messages.append(Message(role="user", content=content))
+    chart_paths_before = {c.path for c in session.agent_session.cache.list_charts()}
 
     result = await _maybe_await(session.agent_session.ask_result(content))
     if not session.is_byok and session.user_id is not None:
@@ -361,6 +386,7 @@ async def send_message(
 
     assistant_message = Message(role="assistant", content=answer)
     session.messages.append(assistant_message)
+    session.messages.extend(_new_chart_messages(session, chart_paths_before))
     return ChatResponse(
         message=assistant_message,
         session=_serialise_session(session),
@@ -452,33 +478,41 @@ async def stream_message(
             yield _stream_event("error", answer)
         session.messages.append(Message(role="assistant", content=answer))
 
-        for chart in session.agent_session.cache.list_charts():
-            if chart.path in chart_paths_before:
-                continue
-            try:
-                encoded = base64.b64encode(chart.read_bytes()).decode("ascii")
-            except OSError:
-                continue
-            chart_message = Message(
-                role="assistant",
-                content="",
-                image_base64=encoded,
-                image_format=chart.format,
-                image_title=chart.title,
-            )
+        for chart_message in _new_chart_messages(session, chart_paths_before):
             session.messages.append(chart_message)
             yield _stream_event(
                 "chart",
                 {
-                    "base64": encoded,
-                    "format": chart.format,
-                    "title": chart.title,
+                    "url": chart_message.image_url,
+                    "format": chart_message.image_format,
+                    "title": chart_message.image_title,
                 },
             )
 
         yield _stream_event("done", _serialise_session(session).model_dump())
 
     return StreamingResponse(events(), media_type="application/x-ndjson")
+
+
+def _new_chart_messages(
+    session: SessionState, paths_before: set[str]
+) -> list[Message]:
+    """Build `Message`s for charts drawn since `paths_before` was captured."""
+    charts = session.agent_session.cache.list_charts()
+    messages = []
+    for index, chart in enumerate(charts):
+        if chart.path in paths_before:
+            continue
+        messages.append(
+            Message(
+                role="assistant",
+                content="",
+                image_url=f"/sessions/{session.id}/charts/{index}",
+                image_format=chart.format,
+                image_title=chart.title,
+            )
+        )
+    return messages
 
 
 def _serialise_session(session: SessionState) -> SessionResponse:

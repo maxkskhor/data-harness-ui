@@ -11,6 +11,7 @@ import {
   type ReactNode,
 } from "react";
 import {
+  apiUrl,
   createSession,
   getMe,
   githubLoginUrl,
@@ -542,7 +543,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
   }
 
   const isUser = message.role === "user";
-  const isChart = Boolean(message.image_base64);
+  const isChart = Boolean(message.image_url);
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div
@@ -568,18 +569,64 @@ function MessageBubble({ message }: { message: ChatMessage }) {
 }
 
 function ChartImage({ message }: { message: ChatMessage }) {
+  const [loaded, setLoaded] = useState(false);
+  const imgRef = useRef<HTMLImageElement | null>(null);
+
+  // A fast/local backend can finish loading the image before this effect
+  // (and thus the onLoad prop) attaches, which permanently misses the
+  // browser's one-shot 'load' event — check `complete` on mount as a
+  // fallback so the chart doesn't get stuck invisible at opacity-0.
+  useEffect(() => {
+    if (imgRef.current?.complete) {
+      setLoaded(true);
+    }
+  }, []);
+
+  if (!message.image_url) {
+    return null;
+  }
+  const src = apiUrl(message.image_url);
   return (
-    <figure>
-      <img
-        src={`data:image/${message.image_format ?? "png"};base64,${message.image_base64}`}
-        alt={message.image_title ?? "Chart"}
-        className="max-w-full rounded border border-border"
-      />
-      {message.image_title ? (
-        <figcaption className="mt-1 text-xs text-muted">
-          {message.image_title}
-        </figcaption>
-      ) : null}
+    <figure className="space-y-1.5">
+      <a
+        href={src}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="block overflow-hidden rounded-md border border-border bg-white p-2 shadow-sm transition hover:opacity-95"
+      >
+        <div className="relative min-w-64">
+          {/* width/height give the browser a concrete intrinsic size before
+              the image loads — without it, an out-of-flow/unsized image
+              contributes nothing to this flex-item bubble's shrink-to-fit
+              width, and the whole card collapses to near zero. */}
+          {/* eslint-disable-next-line @next/next/no-img-element -- charts are
+              served from the backend, not Next's static asset pipeline. */}
+          <img
+            ref={imgRef}
+            src={src}
+            alt={message.image_title ?? "Chart"}
+            width={560}
+            height={350}
+            onLoad={() => setLoaded(true)}
+            className={`h-auto w-full rounded object-contain transition-opacity duration-200 ${
+              loaded ? "opacity-100" : "opacity-0"
+            }`}
+          />
+          {!loaded ? (
+            <div className="absolute inset-0 animate-pulse rounded bg-black/5" />
+          ) : null}
+        </div>
+      </a>
+      <div className="flex items-center justify-between text-xs text-muted">
+        <span>{message.image_title ?? "Chart"}</span>
+        <a
+          href={src}
+          download
+          className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+        >
+          Download
+        </a>
+      </div>
     </figure>
   );
 }
@@ -791,7 +838,7 @@ function chartMessage(event: ChartEvent): ChatMessage {
   return {
     role: "assistant",
     content: "",
-    image_base64: event.base64,
+    image_url: event.url,
     image_format: event.format,
     image_title: event.title ?? null,
   };

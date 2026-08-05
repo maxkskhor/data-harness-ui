@@ -4,7 +4,7 @@ export type ChatMessage = {
   kind?: "tool_use" | "tool_result";
   title?: string;
   isError?: boolean;
-  image_base64?: string | null;
+  image_url?: string | null;
   image_format?: string | null;
   image_title?: string | null;
 };
@@ -32,6 +32,11 @@ export type Me = {
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+
+/** Resolve a backend-relative path (e.g. a chart's `image_url`) to an absolute URL. */
+export function apiUrl(path: string): string {
+  return `${API_BASE_URL}${path}`;
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
@@ -117,7 +122,7 @@ export type ToolResultEvent = {
 };
 
 export type ChartEvent = {
-  base64: string;
+  url: string;
   format: string;
   title?: string | null;
 };

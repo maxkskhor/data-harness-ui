@@ -48,6 +48,15 @@ def _csv_bytes(content: str = "a,b\n1,2\n3,4\n") -> bytes:
     return content.encode()
 
 
+def _mock_chart(path: str = "/tmp/chart.png", data: bytes = b"fake-png-bytes") -> MagicMock:
+    chart = MagicMock()
+    chart.path = path
+    chart.format = "png"
+    chart.title = "Revenue by Month"
+    chart.read_bytes = MagicMock(return_value=data)
+    return chart
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -311,6 +320,93 @@ def test_send_message_appends_to_history(client, session_id):
     # user + assistant + user + assistant
     assert roles.count("user") == 2
     assert roles.count("assistant") == 2
+
+
+# ---------------------------------------------------------------------------
+# Charts
+# ---------------------------------------------------------------------------
+
+def test_stream_message_emits_chart_event_with_url_not_bytes(client):
+    mock_session = _mock_agent_session()
+    chart = _mock_chart()
+
+    async def ask_stream(_content):
+        mock_session.cache.list_charts = MagicMock(return_value=[chart])
+        yield "Here's the chart."
+
+    mock_session.ask_stream = ask_stream
+    with patch("main._make_agent_session", return_value=mock_session):
+        resp = client.post("/sessions")
+        sid = resp.json()["id"]
+
+    resp = client.post(f"/sessions/{sid}/messages/stream", json={"content": "plot it"})
+
+    assert resp.status_code == 200
+    events = [line for line in resp.text.splitlines() if line]
+    chart_events = [e for e in events if '"type": "chart"' in e]
+    assert len(chart_events) == 1
+    assert f"/sessions/{sid}/charts/0" in chart_events[0]
+    # The raw bytes must never appear in the stream itself.
+    assert "fake-png-bytes" not in resp.text
+
+    history = client.get(f"/sessions/{sid}").json()["messages"]
+    chart_message = history[-1]
+    assert chart_message["image_url"] == f"/sessions/{sid}/charts/0"
+    assert chart_message["image_title"] == "Revenue by Month"
+    assert chart_message.get("image_base64") is None
+
+
+def test_send_message_includes_chart_when_produced(client):
+    mock_session = _mock_agent_session()
+    chart = _mock_chart()
+    with patch("main._make_agent_session", return_value=mock_session):
+        resp = client.post("/sessions")
+        sid = resp.json()["id"]
+
+    # The chart must only appear in list_charts() *after* ask_result runs,
+    # same as a real turn — otherwise it'd already be in chart_paths_before
+    # and get (correctly) treated as pre-existing, not new.
+    original_result = mock_session.ask_result.return_value
+
+    async def ask_result(_content):
+        mock_session.cache.list_charts = MagicMock(return_value=[chart])
+        return original_result
+
+    mock_session.ask_result = ask_result
+    resp = client.post(f"/sessions/{sid}/messages", json={"content": "plot it"})
+
+    assert resp.status_code == 200
+    history = resp.json()["session"]["messages"]
+    chart_message = history[-1]
+    assert chart_message["image_url"] == f"/sessions/{sid}/charts/0"
+    assert chart_message["image_format"] == "png"
+
+
+def test_get_chart_serves_bytes(client):
+    mock_session = _mock_agent_session()
+    chart = _mock_chart(data=b"\x89PNG-fake-bytes")
+    mock_session.cache.list_charts = MagicMock(return_value=[chart])
+    with patch("main._make_agent_session", return_value=mock_session):
+        resp = client.post("/sessions")
+        sid = resp.json()["id"]
+
+    resp = client.get(f"/sessions/{sid}/charts/0")
+
+    assert resp.status_code == 200
+    assert resp.content == b"\x89PNG-fake-bytes"
+    assert resp.headers["content-type"] == "image/png"
+    assert "immutable" in resp.headers["cache-control"]
+
+
+def test_get_chart_out_of_range_returns_404(client, session_id):
+    resp = client.get(f"/sessions/{session_id}/charts/0")
+    assert resp.status_code == 404
+
+
+def test_get_chart_requires_session_ownership(client, session_id):
+    with patch("main.auth.current_user_id", return_value=2):
+        resp = client.get(f"/sessions/{session_id}/charts/0")
+    assert resp.status_code == 404
 
 
 def test_send_empty_message_rejected(client, session_id):

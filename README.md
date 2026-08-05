@@ -238,7 +238,7 @@ Newline-delimited JSON events:
 {"type":"tool_use","data":{"name":"python_interpreter","input":{"code":"df.head()"}}}
 {"type":"tool_result","data":{"content":"shape: (5, 8)","is_error":false}}
 {"type":"chunk","data":"# Summary\n"}
-{"type":"chart","data":{"base64":"...","format":"png","title":"y = x^2"}}
+{"type":"chart","data":{"url":"/sessions/{id}/charts/0","format":"png","title":"y = x^2"}}
 {"type":"done","data":{"id":"...","messages":[...]}}
 ```
 
@@ -246,8 +246,18 @@ Newline-delimited JSON events:
 tool-use blocks → `tool_use`, tool returns → `tool_result`. Chart artifacts
 aren't part of `data-harness`'s own stream API (only its non-streaming
 `RunResult.charts`); the backend diffs `SessionCache.list_charts()` before
-and after each turn and emits any new ones as `chart` events, base64-encoded
-inline (no separate file-serving endpoint).
+and after each turn and treats any new ones as new messages.
+
+Charts are served by index from `GET /sessions/{session_id}/charts/{index}`
+rather than embedded as base64 — a `Message.image_url` (and the `chart`
+event's `url`) is just a path into that endpoint. Earlier versions embedded
+full base64 PNGs in every message and re-sent them on every session fetch;
+for a chart-heavy conversation that made every subsequent turn's response
+(and every `GET /sessions/{id}`) grow with the *total* image bytes generated
+so far, not just the new ones — a 2-chart session's per-turn payload roughly
+doubled from ~63KB to ~127KB, confirmed by measuring actual responses. The
+index is stable because `_make_agent_session` builds the cache with no
+`hot_limit`, so it never evicts entries for the life of the process.
 
 ## Project shape
 
