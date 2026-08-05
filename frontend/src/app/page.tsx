@@ -691,6 +691,41 @@ function MarkdownContent({ content }: { content: string }) {
             </ul>
           );
         }
+        if (block.type === "table") {
+          return (
+            <div
+              key={index}
+              className="overflow-auto rounded border border-border"
+            >
+              <table className="min-w-full border-collapse text-left text-xs">
+                <thead className="bg-panel text-muted">
+                  <tr>
+                    {block.header.map((cell, cellIndex) => (
+                      <th
+                        key={cellIndex}
+                        scope="col"
+                        className="border-b border-border px-2 py-1.5 font-mono font-medium"
+                      >
+                        {renderInlineMarkdown(cell)}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {block.rows.map((row, rowIndex) => (
+                    <tr key={rowIndex}>
+                      {row.map((cell, cellIndex) => (
+                        <td key={cellIndex} className="px-2 py-1.5">
+                          {renderInlineMarkdown(cell)}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        }
         return (
           <p key={index} className="whitespace-pre-wrap">
             {renderInlineMarkdown(block.content)}
@@ -705,7 +740,15 @@ type MarkdownBlock =
   | { type: "code"; content: string }
   | { type: "heading"; content: string }
   | { type: "list"; items: string[] }
+  | { type: "table"; header: string[]; rows: string[][] }
   | { type: "paragraph"; content: string };
+
+const TABLE_SEPARATOR_ROW = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+
+function parseTableRow(line: string): string[] {
+  const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+  return trimmed.split("|").map((cell) => cell.trim());
+}
 
 function splitMarkdownBlocks(content: string): MarkdownBlock[] {
   const lines = content.split("\n");
@@ -728,7 +771,9 @@ function splitMarkdownBlocks(content: string): MarkdownBlock[] {
     }
   }
 
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
     if (line.trim().startsWith("```")) {
       if (code === null) {
         flushParagraph();
@@ -749,6 +794,28 @@ function splitMarkdownBlocks(content: string): MarkdownBlock[] {
     if (!line.trim()) {
       flushParagraph();
       flushList();
+      continue;
+    }
+
+    // A GFM pipe table: a `| ... |` row followed by a `|---|---|`-style
+    // separator row. Consume rows until a blank line or a line that isn't
+    // itself a pipe row.
+    if (
+      line.trim().startsWith("|") &&
+      i + 1 < lines.length &&
+      TABLE_SEPARATOR_ROW.test(lines[i + 1])
+    ) {
+      flushParagraph();
+      flushList();
+      const header = parseTableRow(line);
+      const rows: string[][] = [];
+      i += 2; // skip the header row and the separator row
+      while (i < lines.length && lines[i].trim().startsWith("|")) {
+        rows.push(parseTableRow(lines[i]));
+        i++;
+      }
+      i--; // the outer for-loop's increment accounts for the last row consumed
+      blocks.push({ type: "table", header, rows });
       continue;
     }
 
