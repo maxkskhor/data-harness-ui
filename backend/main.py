@@ -10,6 +10,7 @@ import json
 import inspect
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import AsyncGenerator
 from typing import Any, Literal
@@ -32,10 +33,11 @@ from data_harness import (
     Usage,
     resolve_async_adapter,
 )
+from data_harness.core.session import FORMAT_VERSION, encode_entry
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session as DbSession
 from starlette.middleware.sessions import SessionMiddleware
@@ -86,6 +88,24 @@ class MeResponse(BaseModel):
     avatar_url: str | None = None
     budget_remaining_cents: float | None = None
     budget_total_cents: float = budget.MONTHLY_BUDGET_CENTS
+
+
+class CacheHandleInfo(BaseModel):
+    name: str
+    snapshot: str
+    location: str
+    storage_type: str
+
+
+class ContextResponse(BaseModel):
+    turns_used: int
+    max_turns: int
+    messages: int
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    handles: list[CacheHandleInfo]
 
 
 @dataclass
@@ -279,6 +299,59 @@ def create_session(choice: SessionKeyChoice = Depends(resolve_session_key)) -> S
 )
 def get_session(session_id: str, request: Request) -> SessionResponse:
     return _serialise_session(_get_session(session_id, request))
+
+
+@app.get("/sessions/{session_id}/context", response_model=ContextResponse)
+def get_session_context(session_id: str, request: Request) -> ContextResponse:
+    """What the model actually has to work with right now: token accounting
+    per data-harness's session tree (real provider-reported usage, not an
+    estimate), turns used against the cap, and every cache handle with where
+    it physically lives (hot in memory, or spilled to disk)."""
+    session = _get_session(session_id, request)
+    harness = session.agent_session.harness
+    stats = harness.session.stats()
+    cache = session.agent_session.cache
+    storage = cache.storage_metadata()
+    handles = [
+        CacheHandleInfo(
+            name=name,
+            snapshot=snapshot,
+            location=storage.get(name, {}).get("location", "memory"),
+            storage_type=storage.get(name, {}).get("storage_type", "memory"),
+        )
+        for name, snapshot in cache.list_handles().items()
+    ]
+    return ContextResponse(
+        turns_used=stats.turns,
+        max_turns=harness.max_turns,
+        messages=stats.messages,
+        input_tokens=stats.input_tokens,
+        output_tokens=stats.output_tokens,
+        cache_read_tokens=stats.cache_read_tokens,
+        cache_write_tokens=stats.cache_write_tokens,
+        handles=handles,
+    )
+
+
+@app.get("/sessions/{session_id}/tree", response_class=PlainTextResponse)
+def get_session_tree(session_id: str, request: Request) -> str:
+    """The session exactly as it would be written to a `.jsonl` file: a
+    header line, then one line per entry, root to the active leaf. This
+    session never touches disk (in-memory session store), so it's built live
+    from the same `encode_entry` a real `JsonlSessionStore` calls on every
+    `append()` — byte-for-byte the same format, just assembled on request
+    instead of streamed to a file as it happens."""
+    session = _get_session(session_id, request)
+    tree = session.agent_session.harness.session
+    header = {
+        "type": "session",
+        "version": FORMAT_VERSION,
+        "id": session_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    lines = [json.dumps(header)]
+    lines.extend(json.dumps(encode_entry(entry)) for entry in tree.branch())
+    return "\n".join(lines) + "\n"
 
 
 @app.get("/sessions/{session_id}/charts/{handle}")

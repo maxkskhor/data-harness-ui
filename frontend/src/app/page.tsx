@@ -16,14 +16,18 @@ import {
   getMe,
   githubLoginUrl,
   getSession,
+  getSessionContext,
+  getSessionTree,
   logout as apiLogout,
   StreamAborted,
   streamMessage,
   uploadDataset,
+  type CacheHandleInfo,
   type ChartEvent,
   type ChatMessage,
   type Me,
   type Session,
+  type SessionContext,
   type ToolResultEvent,
   type ToolUseEvent,
   type UploadSummary,
@@ -52,6 +56,9 @@ export default function WorkbenchPage() {
   const [error, setError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isSending, setIsSending] = useState(false);
+  // Bumped after every completed turn/upload so the Inspector panel (if
+  // open) knows to refetch — it does not poll while closed.
+  const [inspectorRefresh, setInspectorRefresh] = useState(0);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -190,6 +197,7 @@ export default function WorkbenchPage() {
       setError(errorMessage(err));
     } finally {
       setIsUploading(false);
+      setInspectorRefresh((n) => n + 1);
       event.target.value = "";
     }
   }
@@ -255,6 +263,7 @@ export default function WorkbenchPage() {
     } finally {
       abortControllerRef.current = null;
       setIsSending(false);
+      setInspectorRefresh((n) => n + 1);
       textareaRef.current?.focus();
     }
   }
@@ -551,6 +560,13 @@ export default function WorkbenchPage() {
                 <Stat label="Sources" value={String(session?.uploads.length ?? 0)} />
               </dl>
             </section>
+
+            {session ? (
+              <InspectorPanel
+                sessionId={session.id}
+                refreshSignal={inspectorRefresh}
+              />
+            ) : null}
           </aside>
         </div>
       </div>
@@ -996,6 +1012,223 @@ function SystemMessage({ content }: { content: string }) {
   return (
     <div className="mx-auto rounded border border-border bg-background px-3 py-2 font-mono text-xs text-muted">
       {content}
+    </div>
+  );
+}
+
+type InspectorTab = "context" | "record";
+
+// data-harness's two selling points made visible: exactly what's in the
+// model's context right now (real per-turn token accounting, not an
+// estimate, plus every cache handle and where it physically lives), and the
+// append-only session record in the same JSONL format a real
+// JsonlSessionStore would have written to disk.
+function InspectorPanel({
+  sessionId,
+  refreshSignal,
+}: {
+  sessionId: string;
+  refreshSignal: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState<InspectorTab>("context");
+  const [context, setContext] = useState<SessionContext | null>(null);
+  const [tree, setTree] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    const request =
+      tab === "context"
+        ? getSessionContext(sessionId).then((data) => {
+            if (!cancelled) setContext(data);
+          })
+        : getSessionTree(sessionId).then((data) => {
+            if (!cancelled) setTree(data);
+          });
+    request
+      .catch((err) => {
+        if (!cancelled) setError(errorMessage(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, tab, sessionId, refreshSignal]);
+
+  function downloadTree() {
+    if (!tree) {
+      return;
+    }
+    const blob = new Blob([tree], { type: "application/x-ndjson" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${sessionId}.jsonl`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  return (
+    <section className="rounded-lg border border-border bg-panel p-4">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full items-center justify-between gap-3 text-left"
+      >
+        <div>
+          <h2 className="text-sm font-medium text-foreground">Inspector</h2>
+          <p className="mt-0.5 text-xs text-muted">
+            Live context and the raw session record.
+          </p>
+        </div>
+        <span className="shrink-0 text-xs text-muted">
+          {open ? "Hide" : "Show"}
+        </span>
+      </button>
+
+      {open ? (
+        <div className="mt-4 space-y-3">
+          <div className="flex gap-2">
+            <TabButton
+              active={tab === "context"}
+              onClick={() => setTab("context")}
+            >
+              Context
+            </TabButton>
+            <TabButton
+              active={tab === "record"}
+              onClick={() => setTab("record")}
+            >
+              Session record
+            </TabButton>
+          </div>
+
+          {loading ? (
+            <p className="text-xs text-muted">Loading...</p>
+          ) : error ? (
+            <p className="text-xs text-danger">{error}</p>
+          ) : tab === "context" ? (
+            context ? <ContextInspector context={context} /> : null
+          ) : tree ? (
+            <div className="space-y-2">
+              <pre className="max-h-72 overflow-auto rounded border border-border bg-background p-3 font-mono text-[11px] leading-5 text-foreground/80">
+                {tree}
+              </pre>
+              <button
+                type="button"
+                onClick={downloadTree}
+                className="text-xs text-muted underline decoration-dotted underline-offset-2 hover:text-foreground"
+              >
+                Download .jsonl
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded border px-2.5 py-1 text-xs transition ${
+        active
+          ? "border-accent bg-accent/10 text-accent"
+          : "border-border text-muted hover:border-accent hover:text-foreground"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function ContextInspector({ context }: { context: SessionContext }) {
+  const turnsPct =
+    context.max_turns > 0
+      ? Math.min(100, Math.round((context.turns_used / context.max_turns) * 100))
+      : 0;
+  return (
+    <div className="space-y-4">
+      <div>
+        <div className="flex items-center justify-between text-xs text-muted">
+          <span>Turns used</span>
+          <span>
+            {context.turns_used} / {context.max_turns}
+          </span>
+        </div>
+        <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-panel-soft">
+          <div
+            className="h-full rounded-full bg-accent transition-[width]"
+            style={{ width: `${turnsPct}%` }}
+          />
+        </div>
+      </div>
+
+      <dl className="grid grid-cols-2 gap-3 text-sm">
+        <Stat label="Input tokens" value={context.input_tokens.toLocaleString()} />
+        <Stat label="Output tokens" value={context.output_tokens.toLocaleString()} />
+        <Stat label="Cache read" value={context.cache_read_tokens.toLocaleString()} />
+        <Stat label="Cache write" value={context.cache_write_tokens.toLocaleString()} />
+      </dl>
+
+      <div>
+        <h3 className="font-mono text-xs font-medium uppercase tracking-wide text-muted">
+          Cache handles ({context.handles.length})
+        </h3>
+        {context.handles.length > 0 ? (
+          <div className="mt-2 space-y-2">
+            {context.handles.map((handle) => (
+              <CacheHandleRow key={handle.name} handle={handle} />
+            ))}
+          </div>
+        ) : (
+          <p className="mt-2 text-xs text-muted">Nothing in the cache yet.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CacheHandleRow({ handle }: { handle: CacheHandleInfo }) {
+  return (
+    <div className="rounded border border-border bg-background p-2">
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate font-mono text-xs text-accent">
+          {handle.name}
+        </span>
+        <span
+          className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${
+            handle.location === "disk"
+              ? "bg-tool-soft text-tool"
+              : "bg-panel-soft text-muted"
+          }`}
+        >
+          {handle.location}
+        </span>
+      </div>
+      <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-4 text-muted">
+        {handle.snapshot}
+      </pre>
     </div>
   );
 }

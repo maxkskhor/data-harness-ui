@@ -30,6 +30,24 @@ export type Me = {
   budget_total_cents: number;
 };
 
+export type CacheHandleInfo = {
+  name: string;
+  snapshot: string;
+  location: "memory" | "disk";
+  storage_type: string;
+};
+
+export type SessionContext = {
+  turns_used: number;
+  max_turns: number;
+  messages: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  handles: CacheHandleInfo[];
+};
+
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
@@ -72,6 +90,21 @@ export function createSession(byokKey?: string): Promise<Session> {
 
 export function getSession(sessionId: string): Promise<Session> {
   return request<Session>(`/sessions/${sessionId}`);
+}
+
+export function getSessionContext(sessionId: string): Promise<SessionContext> {
+  return request<SessionContext>(`/sessions/${sessionId}/context`);
+}
+
+export async function getSessionTree(sessionId: string): Promise<string> {
+  const response = await fetch(`${API_BASE_URL}/sessions/${sessionId}/tree`, {
+    credentials: "include",
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new Error(body?.detail ?? `Request failed with ${response.status}`);
+  }
+  return response.text();
 }
 
 export function uploadDataset(

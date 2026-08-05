@@ -26,6 +26,11 @@ of pasted into the chat transcript.
   can stop a run mid-stream.
 - **Real charts** — the sandbox allowlists `matplotlib`/`seaborn`/`plotly`;
   a generated figure is captured and shown inline as an image.
+- **An Inspector panel** exposing two things most agent UIs hide: exactly
+  what's in the model's context right now (real per-turn token accounting,
+  not an estimate, plus every cache handle and where it physically lives),
+  and the append-only session record in the exact JSONL format `data-harness`
+  would write to disk — downloadable, not just a claim.
 
 ## Architecture
 
@@ -272,6 +277,39 @@ it arrives — before the backend can resolve anything — the `answer` event
 carries the corrected final text once the stream completes, and the client
 replaces what it displayed with it (without touching the tool-call trace
 bubbles shown live, which aren't part of `session.messages` at all).
+
+## Inspector: context and session record
+
+Two endpoints exist purely to make `data-harness` internals visible in the
+UI instead of just documented in prose. Neither is cost-generating, so
+neither carries the rate-limit dependency the chat endpoints do — both just
+require the caller to own the session, same as everything else.
+
+```text
+GET /sessions/{session_id}/context
+GET /sessions/{session_id}/tree
+```
+
+**`/context`** reports what the model actually has to work with right now:
+turns used against `max_turns`, and token accounting — input, output,
+cache-read, cache-write — pulled from `Harness.session.stats()`, which sums
+every real `TurnEntry` the provider reported. This is not `estimate_tokens`'s
+chars/4 guess; it's the same numbers the provider billed. It also lists every
+handle currently in the `SessionCache` via `storage_metadata()`, with each
+one's snapshot and whether it's hot in memory or spilled to disk.
+
+**`/tree`** returns the session exactly as it would look on disk: a header
+line, then one line per entry, root to the active leaf, built with the same
+`encode_entry`/`FORMAT_VERSION` a real `JsonlSessionStore` calls on every
+`append()` (`data_harness.core.session`, promoted to that package's public
+surface in v1.3.3 specifically for this — previously reaching a live,
+in-memory-only session's entries into this format required importing an
+internal module with no stability guarantee). This session never touches
+disk itself (`_make_agent_session` never wires a `JsonlSessionStore`), so the
+line-per-entry file is assembled fresh on request rather than streamed to a
+file as it happens — same format, different write path. The point isn't the
+convenience; it's proving the claim that the run record is "just JSONL," not
+something a UI is asserting without letting you check.
 
 ## Project shape
 

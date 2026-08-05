@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,6 +12,10 @@ from data_harness import (
     ContentBlockStartEvent,
     ContentBlockStopEvent,
     InputJSONDelta,
+    Message,
+    MemorySessionStore,
+    Session,
+    TextBlock,
     TextDelta,
     ToolResultEvent,
     ToolUseBlock,
@@ -42,7 +47,18 @@ def _mock_agent_session(answer: str = "mocked answer") -> MagicMock:
     session.ask_stream = ask_stream
     session.cache = MagicMock()
     session.cache.list_charts = MagicMock(return_value=[])
+    session.cache.list_handles = MagicMock(return_value={})
+    session.cache.storage_metadata = MagicMock(return_value={})
+    session.harness = MagicMock(session=Session(MemorySessionStore("test")), max_turns=10)
     return session
+
+
+def _wire_harness(mock_session: MagicMock, real_session: Session, *, max_turns: int = 10) -> None:
+    """Point a mock AsyncAgentSession's harness at a real Session tree, so
+    the /context and /tree endpoints exercise the actual data-harness
+    session-tree code (stats(), branch(), encode_entry()) rather than a
+    hand-rolled fake of it."""
+    mock_session.harness = MagicMock(session=real_session, max_turns=max_turns)
 
 
 def _csv_bytes(content: str = "a,b\n1,2\n3,4\n") -> bytes:
@@ -485,6 +501,93 @@ def test_unresolvable_inline_chart_reference_is_stripped(client):
     content = resp.json()["message"]["content"]
     assert "not_a_real_handle" not in content
     assert "![" not in content
+
+
+# ---------------------------------------------------------------------------
+# Context and session record
+# ---------------------------------------------------------------------------
+
+def test_get_context_reports_real_token_accounting_and_handles(client):
+    mock_session = _mock_agent_session()
+    real_session = Session(MemorySessionStore("s"))
+    real_session.append_message(Message(role="user", content=[TextBlock(text="hi")]))
+    real_session.append_turn(
+        turn=1, input_tokens=120, output_tokens=40, cache_read_tokens=10, cache_write_tokens=5
+    )
+    _wire_harness(mock_session, real_session, max_turns=10)
+    mock_session.cache.list_handles = MagicMock(
+        return_value={"sales": '{"type": "dataframe", "shape": [5, 3]}'}
+    )
+    mock_session.cache.storage_metadata = MagicMock(
+        return_value={"sales": {"location": "memory", "storage_type": "memory"}}
+    )
+    with patch("main._make_agent_session", return_value=mock_session):
+        resp = client.post("/sessions")
+        sid = resp.json()["id"]
+
+    resp = client.get(f"/sessions/{sid}/context")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["turns_used"] == 1
+    assert body["max_turns"] == 10
+    assert body["messages"] == 1
+    assert body["input_tokens"] == 120
+    assert body["output_tokens"] == 40
+    assert body["cache_read_tokens"] == 10
+    assert body["cache_write_tokens"] == 5
+    assert body["handles"] == [
+        {
+            "name": "sales",
+            "snapshot": '{"type": "dataframe", "shape": [5, 3]}',
+            "location": "memory",
+            "storage_type": "memory",
+        }
+    ]
+
+
+def test_get_context_requires_session_ownership(client, session_id):
+    with patch("main.auth.current_user_id", return_value=2):
+        resp = client.get(f"/sessions/{session_id}/context")
+    assert resp.status_code == 404
+
+
+def test_get_tree_returns_valid_jsonl_matching_the_real_format(client):
+    mock_session = _mock_agent_session()
+    real_session = Session(MemorySessionStore("s"))
+    real_session.append_message(Message(role="user", content=[TextBlock(text="hello")]))
+    real_session.append_turn(turn=1, input_tokens=10, output_tokens=5)
+    _wire_harness(mock_session, real_session)
+    with patch("main._make_agent_session", return_value=mock_session):
+        resp = client.post("/sessions")
+        sid = resp.json()["id"]
+
+    resp = client.get(f"/sessions/{sid}/tree")
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/plain")
+    lines = [json.loads(line) for line in resp.text.splitlines() if line.strip()]
+    assert lines[0]["type"] == "session"
+    assert lines[0]["id"] == sid
+    assert lines[1]["type"] == "message"
+    assert lines[1]["message"]["content"][0]["text"] == "hello"
+    assert lines[2]["type"] == "turn"
+    assert lines[2]["input_tokens"] == 10
+
+
+def test_get_tree_on_a_fresh_session_is_just_the_header(client, session_id):
+    resp = client.get(f"/sessions/{session_id}/tree")
+
+    assert resp.status_code == 200
+    lines = [json.loads(line) for line in resp.text.splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert lines[0]["type"] == "session"
+
+
+def test_get_tree_requires_session_ownership(client, session_id):
+    with patch("main.auth.current_user_id", return_value=2):
+        resp = client.get(f"/sessions/{session_id}/tree")
+    assert resp.status_code == 404
 
 
 def test_send_empty_message_rejected(client, session_id):
