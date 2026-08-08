@@ -38,7 +38,13 @@ export type CacheHandleInfo = {
 };
 
 export type SessionContext = {
-  turns_used: number;
+  // max_turns is a per-message cap (data-harness resets its turn counter at
+  // the start of every ask_result() call), so it's only meaningful next to
+  // last_turn_used. session_turns is the lifetime total across the whole
+  // chat and will happily exceed max_turns in a long conversation — that's
+  // not the cap being hit, it's just accumulated activity.
+  session_turns: number;
+  last_turn_used: number;
   max_turns: number;
   messages: number;
   input_tokens: number;

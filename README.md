@@ -290,13 +290,23 @@ GET /sessions/{session_id}/context
 GET /sessions/{session_id}/tree
 ```
 
-**`/context`** reports what the model actually has to work with right now:
-turns used against `max_turns`, and token accounting — input, output,
-cache-read, cache-write — pulled from `Harness.session.stats()`, which sums
-every real `TurnEntry` the provider reported. This is not `estimate_tokens`'s
-chars/4 guess; it's the same numbers the provider billed. It also lists every
-handle currently in the `SessionCache` via `storage_metadata()`, with each
-one's snapshot and whether it's hot in memory or spilled to disk.
+**`/context`** reports what the model actually has to work with right now.
+Turn accounting is two separate numbers, not one: `data-harness` resets its
+turn counter at the start of every `ask_result()` call, so `max_turns` is a
+per-message cap, not a session-lifetime one — comparing it against the
+session's cumulative turn count would eventually show something like "23/10"
+in a long enough chat and be misleading well before that. `last_turn_used`
+(from `AgentSession.last_result.turns`) is what's actually meaningful next to
+`max_turns`; `session_turns` (from `Harness.session.stats().turns`, summing
+every real `TurnEntry`) is shown separately as a plain lifetime count. Token
+accounting — input, output, cache-read, cache-write — comes from the same
+`stats()` call: real provider-reported numbers, not `estimate_tokens`'s
+chars/4 guess. `cache_write_tokens` is always `0` for DeepSeek/OpenAI/
+OpenRouter models specifically — neither reports a cache-write count, and `0`
+here means "not reported," not "no caching happened" (see `data-harness`
+v1.3.4). It also lists every handle currently in the `SessionCache` via
+`storage_metadata()`, with each one's snapshot and whether it's hot in memory
+or spilled to disk.
 
 **`/tree`** returns the session exactly as it would look on disk: a header
 line, then one line per entry, root to the active leaf, built with the same

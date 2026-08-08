@@ -1163,24 +1163,31 @@ function TabButton({
 }
 
 function ContextInspector({ context }: { context: SessionContext }) {
-  const turnsPct =
+  // max_turns caps a single exchange, not the whole chat (data-harness
+  // resets the turn counter at the start of every ask_result() call) — so
+  // the progress bar tracks last_turn_used against it, not the lifetime
+  // session_turns total, which is shown separately as a plain count.
+  const lastTurnPct =
     context.max_turns > 0
-      ? Math.min(100, Math.round((context.turns_used / context.max_turns) * 100))
+      ? Math.min(100, Math.round((context.last_turn_used / context.max_turns) * 100))
       : 0;
   return (
     <div className="space-y-4">
       <div>
         <div className="flex items-center justify-between text-xs text-muted">
-          <span>Turns used</span>
+          <span>Last exchange</span>
           <span>
-            {context.turns_used} / {context.max_turns}
+            {context.last_turn_used} / {context.max_turns} turns
           </span>
         </div>
         <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-panel-soft">
           <div
             className="h-full rounded-full bg-accent transition-[width]"
-            style={{ width: `${turnsPct}%` }}
+            style={{ width: `${lastTurnPct}%` }}
           />
+        </div>
+        <div className="mt-1 text-xs text-muted">
+          {context.session_turns} turns total this session
         </div>
       </div>
 

@@ -50,6 +50,12 @@ def _mock_agent_session(answer: str = "mocked answer") -> MagicMock:
     session.cache.list_handles = MagicMock(return_value={})
     session.cache.storage_metadata = MagicMock(return_value={})
     session.harness = MagicMock(session=Session(MemorySessionStore("test")), max_turns=10)
+    # None, not an auto-vivified MagicMock: matches a real _SessionBase
+    # before any ask_result() call, and lets the /context endpoint's
+    # `last_result.turns if last_result is not None else 0` branch be
+    # exercised honestly rather than pulling a mock .turns attribute
+    # through Pydantic validation by accident.
+    session.last_result = None
     return session
 
 
@@ -515,6 +521,7 @@ def test_get_context_reports_real_token_accounting_and_handles(client):
         turn=1, input_tokens=120, output_tokens=40, cache_read_tokens=10, cache_write_tokens=5
     )
     _wire_harness(mock_session, real_session, max_turns=10)
+    mock_session.last_result = MagicMock(turns=1)
     mock_session.cache.list_handles = MagicMock(
         return_value={"sales": '{"type": "dataframe", "shape": [5, 3]}'}
     )
@@ -529,7 +536,8 @@ def test_get_context_reports_real_token_accounting_and_handles(client):
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["turns_used"] == 1
+    assert body["session_turns"] == 1
+    assert body["last_turn_used"] == 1
     assert body["max_turns"] == 10
     assert body["messages"] == 1
     assert body["input_tokens"] == 120
@@ -544,6 +552,48 @@ def test_get_context_reports_real_token_accounting_and_handles(client):
             "storage_type": "memory",
         }
     ]
+
+
+def test_get_context_last_turn_used_is_zero_before_any_message(client, session_id):
+    # A fresh session has no last_result yet - must report 0, not error or
+    # leak a mock/None straight into the response.
+    resp = client.get(f"/sessions/{session_id}/context")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["session_turns"] == 0
+    assert body["last_turn_used"] == 0
+    assert body["max_turns"] == 10
+
+
+def test_session_turns_and_last_turn_used_are_independent_counters(client):
+    # The bug this fixes: max_turns is a per-message cap (resets every
+    # ask_result() call), but session_turns accumulates across the whole
+    # chat. A long session can have session_turns far exceed max_turns
+    # while last_turn_used, the number that actually means something next
+    # to max_turns, stays small. Assert they really are different numbers,
+    # not the same counter read twice.
+    mock_session = _mock_agent_session()
+    real_session = Session(MemorySessionStore("s"))
+    for i in range(1, 13):
+        real_session.append_turn(turn=i, input_tokens=10, output_tokens=5)
+    _wire_harness(mock_session, real_session, max_turns=10)
+    # The most recent individual ask_result() call only took 2 turns, even
+    # though 12 have accumulated across the session's whole history.
+    mock_session.last_result = MagicMock(turns=2)
+    with patch("main._make_agent_session", return_value=mock_session):
+        resp = client.post("/sessions")
+        sid = resp.json()["id"]
+
+    resp = client.get(f"/sessions/{sid}/context")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["session_turns"] == 12
+    assert body["last_turn_used"] == 2
+    assert body["max_turns"] == 10
+    assert body["session_turns"] > body["max_turns"]
+    assert body["last_turn_used"] < body["max_turns"]
 
 
 def test_get_context_requires_session_ownership(client, session_id):

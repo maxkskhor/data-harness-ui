@@ -98,7 +98,17 @@ class CacheHandleInfo(BaseModel):
 
 
 class ContextResponse(BaseModel):
-    turns_used: int
+    # `max_turns` is a per-message cap: data-harness resets its turn counter
+    # to 0 at the start of every ask_result() call (core/loop.py), so it is
+    # only ever meaningfully compared against turns spent on the *last*
+    # exchange. `session_turns` is the lifetime total across every message
+    # in this chat (Session.stats().turns walks the whole tree) - real and
+    # useful as an activity/cost figure, but comparing it to max_turns as if
+    # they shared a budget is wrong: a long chat legitimately accumulates
+    # far more total turns than max_turns without ever approaching the cap
+    # on any single message.
+    session_turns: int
+    last_turn_used: int
     max_turns: int
     messages: int
     input_tokens: int
@@ -321,8 +331,10 @@ def get_session_context(session_id: str, request: Request) -> ContextResponse:
         )
         for name, snapshot in cache.list_handles().items()
     ]
+    last_result = session.agent_session.last_result
     return ContextResponse(
-        turns_used=stats.turns,
+        session_turns=stats.turns,
+        last_turn_used=last_result.turns if last_result is not None else 0,
         max_turns=harness.max_turns,
         messages=stats.messages,
         input_tokens=stats.input_tokens,
