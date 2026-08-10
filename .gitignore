@@ -10,3 +10,4 @@ docs/
 # Editor
 .vscode/
 .idea/
+.vercel
