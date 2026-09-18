@@ -75,8 +75,24 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export function getMe(): Promise<Me> {
-  return request<Me>("/auth/me");
+/**
+ * The backend sleeps after ~15 minutes idle on Render's free tier and takes
+ * roughly half a minute to wake. A request arriving mid-wake can be dropped
+ * outright, and a failed `/auth/me` is indistinguishable from "signed out", so
+ * a single attempt silently strands a signed-in visitor on the sign-in screen.
+ * Retry once before believing the answer.
+ */
+export async function getMe(attempts = 2): Promise<Me> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await request<Me>("/auth/me");
+    } catch (error) {
+      if (attempt >= attempts) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  }
 }
 
 export function githubLoginUrl(): string {

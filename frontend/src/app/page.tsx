@@ -38,6 +38,13 @@ type AuthStatus = "loading" | "ready";
 
 const BYOK_STORAGE_KEY = "data-harness-byok-key";
 
+/**
+ * How long to wait on the sign-in check before assuming the backend is asleep
+ * and showing the sign-in screen anyway. A warm backend answers in well under
+ * a second, so this is invisible on the normal path.
+ */
+const SLOW_BACKEND_MS = 1200;
+
 const QUICK_QUESTIONS = [
   "What columns are in this?",
   "Which numeric column has the highest average?",
@@ -46,6 +53,7 @@ const QUICK_QUESTIONS = [
 export default function WorkbenchPage() {
   const [me, setMe] = useState<Me | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatus>("loading");
+  const [backendWaking, setBackendWaking] = useState(false);
   const [byokKey, setByokKey] = useState<string | null>(null);
   const [byokDraft, setByokDraft] = useState("");
 
@@ -84,6 +92,15 @@ export default function WorkbenchPage() {
   useEffect(() => {
     setByokKey(sessionStorage.getItem(BYOK_STORAGE_KEY));
     let isMounted = true;
+    // Blocking the whole page on this call is what makes a sleeping backend
+    // look like a broken app: the visitor gets a bare "checking..." line for
+    // half a minute. Past SLOW_BACKEND_MS we stop waiting and render the
+    // sign-in screen, with the wake called out, while the check finishes.
+    const slowBackend = setTimeout(() => {
+      if (isMounted) {
+        setBackendWaking(true);
+      }
+    }, SLOW_BACKEND_MS);
     getMe()
       .then((next) => {
         if (isMounted) {
@@ -96,12 +113,15 @@ export default function WorkbenchPage() {
         }
       })
       .finally(() => {
+        clearTimeout(slowBackend);
         if (isMounted) {
+          setBackendWaking(false);
           setAuthStatus("ready");
         }
       });
     return () => {
       isMounted = false;
+      clearTimeout(slowBackend);
     };
   }, []);
 
@@ -337,7 +357,7 @@ export default function WorkbenchPage() {
     });
   }
 
-  if (authStatus === "loading") {
+  if (authStatus === "loading" && !backendWaking) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-background text-foreground">
         <p className="font-mono text-xs text-muted">Checking sign-in status...</p>
@@ -348,6 +368,7 @@ export default function WorkbenchPage() {
   if (!canUseApp) {
     return (
       <AuthGate
+        backendWaking={backendWaking}
         byokDraft={byokDraft}
         onByokDraftChange={setByokDraft}
         onSaveKey={saveByokKey}
@@ -1359,10 +1380,12 @@ function errorMessage(error: unknown): string {
 }
 
 function AuthGate({
+  backendWaking,
   byokDraft,
   onByokDraftChange,
   onSaveKey,
 }: {
+  backendWaking: boolean;
   byokDraft: string;
   onByokDraftChange: (value: string) => void;
   onSaveKey: (key: string) => void;
@@ -1376,6 +1399,20 @@ function AuthGate({
         <p className="mt-1 text-xs text-muted">
           Ask questions of a CSV. Python sandboxed, no bash.
         </p>
+
+        {backendWaking ? (
+          <p
+            role="status"
+            className="mt-4 flex items-start gap-2 rounded border border-border bg-panel-soft px-3 py-2 text-xs text-muted"
+          >
+            <span className="mt-1 h-2 w-2 flex-none animate-pulse rounded-full bg-accent" />
+            <span>
+              Waking the backend. It sleeps after 15 minutes idle on the free
+              tier and takes about half a minute to come back, so the first
+              sign-in after a quiet spell is slow.
+            </span>
+          </p>
+        ) : null}
 
         <a
           href={githubLoginUrl()}
